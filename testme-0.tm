@@ -36,18 +36,36 @@ namespace eval ::testme {
   try {set ::nesting} on error {} {
 
 
+    namespace eval ::tap {
+
+
+        proc puts {args} {
+          foreach x $args {::puts $x}
+        }
+
+
+    }
+
+
     set ::nesting -1
 
 
-    variable executor [tpool::create]
+    variable executor [tpool::create -initcmd {
+      set stdout [list]
+      set stderr [list]
+    }]
 
 
     variable pending [list]
 
 
+    variable units [dict create]
+
+
     proc unit {args} {
       variable executor
       variable pending
+      variable units
       set s [llength $args]
       if {$s < 1 || $s % 2 == 0} {error "usage: testme::unit ?-name ...? ?-tags ...? {...}"}
       set opts [lrange $args 0 end-1]
@@ -56,6 +74,8 @@ namespace eval ::testme {
       set tags [list]
       catch {set name [dict get $opts -name]}
       catch {set tags [dict get $opts -tags]}
+      set n [dict size $units]; incr n
+      dict set units $n [dict create -name $name -tags $tags -code $code]
       lappend pending [tpool::post $executor $code]
     }
 
@@ -63,10 +83,19 @@ namespace eval ::testme {
     Import $argv0
 
 
+    tap::puts "TAP version 14" "1..[dict size $units]"
+
+
     while {[llength $pending]} {
       set finished [tpool::wait $executor $pending pending]
       foreach f $finished {
         set pending [lsearch -inline -all -not -exact $pending $f]
+        set name [dict get [dict get $units $f] -name]
+        if {[catch {tpool::get $executor $f} result]} {
+          tap::puts "not ok - $name" "  ---" "  message: $result"
+        } else {
+          tap::puts "ok - $name"
+        }
       }
     }
 

@@ -4,5 +4,6 @@ package require testme
 
 namespace import testme::*
 
-# Blank unit
-unit {}
+unit -name {successful set} {set x 1}
+
+unit -name {failing set} {set y}
