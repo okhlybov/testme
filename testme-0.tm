@@ -92,7 +92,7 @@ namespace eval ::testme {
         set pending [lsearch -inline -all -not -exact $pending $f]
         set name [dict get [dict get $units $f] -name]
         if {[catch {tpool::get $executor $f} result]} {
-          tap::puts "not ok - $name" "  ---" "  message: $result"
+          tap::puts "not ok - $name" "  ---" "  message: $result" "  ..."
         } else {
           tap::puts "ok - $name"
         }
