@@ -4,6 +4,6 @@ Testme is a test suite for the Tcl langauge.
 
 ## Features
 
-- Threaded unit execution
-- Unit tagging & selective execution
+- Parallel unit execution
+- Unit tagging & selective unit execution
 - TAP-compatible output
