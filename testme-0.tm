@@ -274,13 +274,17 @@ namespace eval ::testme {
       }
 
 
-      set cli {
+      set logging false
+
+
+      set opts {
+        {{-l --logging} -info "send unit logging information to stderr" -default true -slot logging}
         {{-h --help} -info "print help" -apply {
           puts stderr "usage: $::argv0 {-f --flag --opt=arg --opt arg ...} {--} {tag +tag -tag ...}"
           puts stderr {}
           puts stderr "+tag | tag     instruct to execute only units with specified tag(s)"
           puts stderr "-tag           instruct skip units with specified tag(s)"
-          clip::usage $testme::cli {} stderr
+          clip::usage $testme::opts {} stderr
           exit 0
         }}
         {{--version} -info "print Testme code version" -apply {
@@ -290,7 +294,7 @@ namespace eval ::testme {
       }
 
 
-      if {[llength $argv]} {set argv [clip::parse $argv $cli]}
+      if {[llength $argv]} {set argv [clip::parse $argv $opts]}
 
 
       set +tags [list]
@@ -383,7 +387,7 @@ namespace eval ::testme {
       variable units [dict create]
 
 
-      variable id 0
+      variable id 1
 
 
       proc union {as bs} {
@@ -424,13 +428,14 @@ namespace eval ::testme {
         set tags [list]
         catch {set name [dict get $opts -name]}
         catch {set tags [dict get $opts -tags]}
-        incr id
+        set tags [lsearch -inline -all -not -exact $tags {}]; # Squeeze out empty {} tags
         dict set units $id [dict create -name $name -tags $tags -code $code -id $id]
         if {([llength ${+tags}] == 0 || [llength [intersection ${+tags} $tags]] > 0) && [llength [intersection ${-tags} $tags]] == 0} {
           lappend pending [tpool::post $executor "execute $id {$code}"]
         } else {
           lappend skipped $id
         }
+        incr id
       }
 
 
@@ -462,17 +467,21 @@ namespace eval ::testme {
             puts "  return: [dict get $return -return]"
             puts "  ..."
           }
-          puts stderr {}
-          puts stderr "# $name"
-          set lines [dict get $return -stdout]
-          if {[llength $lines] > 0} {
-            puts stderr "## stdout:"
-            foreach line $lines {puts stderr $line}
-          }
-          set lines [dict get $return -stderr]
-          if {[llength $lines] > 0} {
-            puts stderr "## stderr:"
-            foreach line $lines {puts stderr $line}
+          if {$logging} {
+            set stdout [dict get $return -stdout]
+            set stderr [dict get $return -stderr]
+            if {[llength $stdout] + [llength $stderr] > 0} {
+              puts stderr {}
+              puts stderr "- $name"
+              if {[llength $stdout] > 0} {
+                puts stderr "-- stdout:"
+                foreach line $stdout {puts stderr $line}
+              }
+              if {[llength $stderr] > 0} {
+                puts stderr "-- stderr:"
+                foreach line $stderr {puts stderr $line}
+              }
+            }
           }
         }
       }
