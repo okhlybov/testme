@@ -276,7 +276,10 @@ namespace eval ::testme {
 
       set cli {
         {{-h --help} -info "print help" -apply {
-          puts stderr "usage: $::argv0 {-f --flag --opt=arg --opt arg ...} {--} {tag +tag -tag ...}\n\n+tag | tag     instruct to execute only units with specified tag(s)\n-tag           instruct skip units with specified tag(s)"
+          puts stderr "usage: $::argv0 {-f --flag --opt=arg --opt arg ...} {--} {tag +tag -tag ...}"
+          puts stderr {}
+          puts stderr "+tag | tag     instruct to execute only units with specified tag(s)"
+          puts stderr "-tag           instruct skip units with specified tag(s)"
           clip::usage $testme::cli {} stderr
           exit 0
         }}
@@ -354,14 +357,14 @@ namespace eval ::testme {
         }
 
 
-        proc execute {code} {
+        proc execute {id code} {
           variable stdout [list]
           variable stderr [list]
           interp create unit
           try {
             interp alias unit puts {} puts
             catch {unit eval $code} return opts
-            return [dict merge $opts [dict create -return $return -stdout $stdout -stderr $stderr]]
+            return [dict merge $opts [dict create -return $return -stdout $stdout -stderr $stderr -id $id]]
           } finally {
             interp delete unit
           }
@@ -378,6 +381,9 @@ namespace eval ::testme {
 
 
       variable units [dict create]
+
+
+      variable id 0
 
 
       proc union {as bs} {
@@ -409,6 +415,7 @@ namespace eval ::testme {
         variable units
         variable +tags
         variable -tags
+        variable id
         set s [llength $args]
         if {$s < 1 || $s % 2 == 0} {error "usage: testme::unit ?-name ...? ?-tags ...? {...}"}
         set opts [lrange $args 0 end-1]
@@ -417,12 +424,12 @@ namespace eval ::testme {
         set tags [list]
         catch {set name [dict get $opts -name]}
         catch {set tags [dict get $opts -tags]}
-        set n [dict size $units]; incr n
-        dict set units $n [dict create -name $name -tags $tags -code $code -id $n]
+        incr id
+        dict set units $id [dict create -name $name -tags $tags -code $code -id $id]
         if {([llength ${+tags}] == 0 || [llength [intersection ${+tags} $tags]] > 0) && [llength [intersection ${-tags} $tags]] == 0} {
-          lappend pending [tpool::post $executor "execute {$code}"]
+          lappend pending [tpool::post $executor "execute $id {$code}"]
         } else {
-          lappend skipped $n
+          lappend skipped $id
         }
       }
 
@@ -434,23 +441,19 @@ namespace eval ::testme {
       puts "1..[dict size $units]"
 
 
-      foreach n $skipped {
-        set name [dict get [dict get $units $n] -name]
-        set id [dict get [dict get $units $n] -id]
-        puts "ok $id - $name # SKIP due to tagging"
+      foreach s $skipped {
+        set u [dict get $units $s]
+        puts "ok [dict get $u -id] - [dict get $u -name] # SKIP due to tagging"
       }
 
 
-# FIXME duplicate reports on skipped (excluded) units
-
-
       while {[llength $pending]} {
-        set finished [tpool::wait $executor $pending pending]
-        foreach n $finished {
-          set pending [lsearch -inline -all -not -exact $pending $n]
-          set name [dict get [dict get $units $n] -name]
-          set id [dict get [dict get $units $n] -id]
-          set return [tpool::get $executor $n]
+        foreach f [tpool::wait $executor $pending pending] {
+          set pending [lsearch -inline -all -not -exact $pending $f]
+          set return [tpool::get $executor $f]
+          set u [dict get $units [dict get $return -id]]
+          set name [dict get $u -name]
+          set id [dict get $u -id]
           if {[dict get $return -code] == 0} {
             puts "ok $id - $name"
           } else {
