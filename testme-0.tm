@@ -36,6 +36,9 @@ namespace eval ::testme {
   try {set ::nesting} on error {} {
 
 
+    package require platform
+
+
     try {
 
 
@@ -277,10 +280,14 @@ namespace eval ::testme {
       set logging false
 
 
+      set jobs 0
+
+
       set opts {
+        {{--jobs= -j=} -info "maximum number of spawned threads" -default 0 -slot jobs}
         {{-l --logging} -info "send unit logging information to stderr" -default true -slot logging}
         {{-h --help} -info "print help" -apply {
-          puts stderr "usage: $::argv0 {-f --flag --opt=arg --opt arg ...} {--} {tag +tag -tag ...}"
+          puts stderr "usage: $::argv0 {-f --flag --opt=arg --opt arg -opt arg ...} {--} {tag +tag -tag ...}"
           puts stderr {}
           puts stderr "+tag | tag     instruct to execute only units with specified tag(s)"
           puts stderr "-tag           instruct skip units with specified tag(s)"
@@ -295,6 +302,20 @@ namespace eval ::testme {
 
 
       if {[llength $argv]} {set argv [clip::parse $argv $opts]}
+
+
+      # FIXME
+      if {$jobs == 0} {
+        set jobs 4
+        switch -glob [platform::identify] {
+          linux-* {
+            catch {set jobs [exec nproc --all]}
+          }
+          windows-* {
+            catch {set jobs $env(NUMBER_OF_PROCESSORS)}
+          }
+        }
+      }
 
 
       set +tags [list]
@@ -316,7 +337,7 @@ namespace eval ::testme {
       ### Execution thread code
 
 
-      variable executor [tpool::create -initcmd {
+      variable executor [tpool::create -maxworkers $jobs -initcmd {
 
 
         proc lshift {var} {
