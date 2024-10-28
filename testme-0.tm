@@ -371,7 +371,7 @@ namespace eval ::testme {
           }
           if {$chan == "stdout" || $chan == "stderr"} {
             if {$newline} {
-              lappend $chan $args
+              foreach arg $args {lappend $chan $arg}
             } else {
               set $chan [concat [lrange [set $chan] 0 end-1] "[lindex [set $chan] end]$args"]
             }
