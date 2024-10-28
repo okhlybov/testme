@@ -18,8 +18,8 @@ namespace eval ::testme {
     interp create box
     try {
       interp alias box ::testme::unit {} ::testme::unit
+      box eval set ::argv0 [file normalize $source]
       box eval set ::nesting [incr $::nesting -1]
-      box eval set argv0 [file normalize $source]
       box eval {
         cd [file dirname $argv0]
         source [file tail $argv0]
@@ -290,7 +290,7 @@ namespace eval ::testme {
           puts stderr "usage: $::argv0 {-f --flag --opt=arg --opt arg -opt arg ...} {--} {tag +tag -tag ...}"
           puts stderr {}
           puts stderr "+tag | tag     instruct to execute only units with specified tag(s)"
-          puts stderr "-tag           instruct skip units with specified tag(s)"
+          puts stderr "-tag           instruct to skip units with specified tag(s)"
           clip::usage $testme::opts {} stderr
           exit 0
         }}
@@ -308,12 +308,8 @@ namespace eval ::testme {
       if {$jobs == 0} {
         set jobs 4
         switch -glob [platform::identify] {
-          linux-* {
-            catch {set jobs [exec nproc --all]}
-          }
-          windows-* {
-            catch {set jobs $env(NUMBER_OF_PROCESSORS)}
-          }
+          linux-* {catch {set jobs [exec nproc --all]}}
+          win32-* {catch {set jobs $env(NUMBER_OF_PROCESSORS)}}
         }
       }
 
@@ -334,10 +330,10 @@ namespace eval ::testme {
       set ::nesting -1
 
 
-      ### Execution thread code
-
-
       variable executor [tpool::create -maxworkers $jobs -initcmd {
+
+
+        ### Execution thread code
 
 
         proc lshift {var} {
@@ -485,7 +481,10 @@ namespace eval ::testme {
           } else {
             puts "not ok $id - $name"
             puts "  ---"
-            puts "  return: [dict get $return -return]"
+            set lines [split [dict get $return -return] "\n"]
+            set r [lindex $lines 0]
+            if {[llength $lines] > 1} {set r "$r >>>"}
+            puts "  return: $r"
             puts "  ..."
           }
           if {$logging} {
