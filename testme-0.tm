@@ -330,7 +330,10 @@ namespace eval ::testme {
       set ::nesting -1
 
 
-      variable executor [tpool::create -maxworkers $jobs -initcmd {
+      set paths "eval tcl::tm::path add [tcl::tm::path list]"
+
+
+      set static {
 
 
         ### Execution thread code
@@ -384,6 +387,7 @@ namespace eval ::testme {
           interp create unit
           try {
             interp alias unit puts {} puts
+            unit eval tcl::tm::path add {*}[tcl::tm::path list]
             catch {unit eval $code} return opts
             return [dict merge $opts [dict create -return $return -stdout $stdout -stderr $stderr -id $id]]
           } finally {
@@ -392,7 +396,10 @@ namespace eval ::testme {
         }
 
 
-      }]
+      }
+
+
+      variable executor [tpool::create -maxworkers $jobs -initcmd "$paths; $static;"]
 
 
       variable pending [list]
