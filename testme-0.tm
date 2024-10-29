@@ -280,21 +280,25 @@ namespace eval ::testme {
       set logging false
 
 
+      set quiet false
+
+
       set jobs 0
 
 
       set opts {
-        {{--jobs= -j=} -info "maximum number of spawned threads" -default 0 -slot jobs}
+        {{--jobs= -j=} -info "set maximum number of spawned threads" -default 0 -slot jobs}
         {{-l --logging} -info "send unit logging information to stderr" -default true -slot logging}
+        {{-q --quiet} -info "suppress TAP output to stdout" -default true -slot quiet}
         {{-h --help} -info "print help" -apply {
           puts stderr "usage: $::argv0 {-f --flag --opt=arg --opt arg -opt arg ...} {--} {tag +tag -tag ...}"
           puts stderr {}
-          puts stderr "+tag | tag     instruct to execute only units with specified tag(s)"
-          puts stderr "-tag           instruct to skip units with specified tag(s)"
+          puts stderr "    +tag | tag    instruct to execute only units with specified tag(s)"
+          puts stderr "    -tag          instruct to skip units with specified tag(s)"
           clip::usage $testme::opts {} stderr
           exit 0
         }}
-        {{--version} -info "print Testme code version" -apply {
+        {{--version} -info "print package version" -apply {
           puts stderr [package require testme]
           exit 0
         }}
@@ -304,7 +308,7 @@ namespace eval ::testme {
       if {[llength $argv]} {set argv [clip::parse $argv $opts]}
 
 
-      # FIXME
+      # TODO
       if {$jobs == 0} {
         set jobs 4
         switch -glob [platform::identify] {
@@ -453,7 +457,7 @@ namespace eval ::testme {
         catch {set name [dict get $opts -name]}
         catch {set tags [dict get $opts -tags]}
         set tags [lsearch -inline -all -not -exact $tags {}]; # Squeeze out empty {} tags
-        dict set units $id [dict create -name $name -tags $tags -code $code -id $id]
+        dict set units $id [dict create -name $name -tags $tags -code $code -id $id -source $::argv0]
         if {([llength ${+tags}] == 0 || [llength [intersection ${+tags} $tags]] > 0) && [llength [intersection ${-tags} $tags]] == 0} {
           lappend pending [tpool::post $executor "execute $id {$code}"]
         } else {
@@ -466,13 +470,13 @@ namespace eval ::testme {
       Import $argv0
 
 
-      puts "TAP version 14"
-      puts "1..[dict size $units]"
-
-
-      foreach s $skipped {
-        set u [dict get $units $s]
-        puts "ok [dict get $u -id] - [dict get $u -name] # SKIP due to tagging"
+      if {!$quiet} {
+        puts "TAP version 14"
+        puts "1..[dict size $units]"
+        foreach s $skipped {
+          set u [dict get $units $s]
+          puts "ok [dict get $u -id] - [dict get $u -name] # SKIP due to tagging"
+        }
       }
 
 
@@ -483,16 +487,20 @@ namespace eval ::testme {
           set u [dict get $units [dict get $return -id]]
           set name [dict get $u -name]
           set id [dict get $u -id]
-          if {[dict get $return -code] == 0} {
-            puts "ok $id - $name"
-          } else {
-            puts "not ok $id - $name"
-            puts "  ---"
-            set lines [split [dict get $return -return] "\n"]
-            set r [lindex $lines 0]
-            if {[llength $lines] > 1} {set r "$r >>>"}
-            puts "  return: $r"
-            puts "  ..."
+          if {!$quiet} {
+            if {[dict get $return -code] == 0} {
+              puts "ok $id - $name"
+            } else {
+              puts "not ok $id - $name"
+              puts "  ---"
+              set lines [split [dict get $return -return] "\n"]
+              set r [lindex $lines 0]
+              if {[llength $lines] > 1} {set r "$r >>>"}
+              puts "  tags: [dict get $u -tags]"
+              puts "  source: [dict get $u -source]"
+              puts "  return: $r"
+              puts "  ..."
+            }
           }
           if {$logging} {
             set stdout [dict get $return -stdout]
@@ -518,8 +526,8 @@ namespace eval ::testme {
 
 
     } on error {result opts} {
-      puts stderr [dict get $opts -errorinfo]
-      puts "Bail out!"
+      if {$logging} {puts stderr [dict get $opts -errorinfo]}
+      if {!$quiet} {puts "Bail out!"}
       exit 1
     }
 
