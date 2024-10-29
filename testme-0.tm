@@ -283,12 +283,16 @@ namespace eval ::testme {
       set quiet false
 
 
+      set tmpdir false
+
+
       set jobs 0
 
 
       set opts {
         {{--jobs= -j=} -info "set maximum number of spawned threads" -default 0 -slot jobs}
         {{-l --logging} -info "send unit logging information to stderr" -default true -slot logging}
+        {{-T --tmpdir} -info "manage \$TMPDIR contents" -default true -slot tmpdir}
         {{-q --quiet} -info "suppress TAP output to stdout" -default true -slot quiet}
         {{-h --help} -info "print help" -apply {
           puts stderr "usage: $::argv0 {-f --flag --opt=arg --opt arg -opt arg ...} {--} {tag +tag -tag ...}"
@@ -467,58 +471,99 @@ namespace eval ::testme {
       }
 
 
-      Import $argv0
+      if {$tmpdir} {
 
 
-      if {!$quiet} {
-        puts "TAP version 14"
-        puts "1..[dict size $units]"
-        foreach s $skipped {
-          set u [dict get $units $s]
-          puts "ok [dict get $u -id] - [dict get $u -name] # SKIP due to tagging"
-        }
+        proc MakeTempDir {args} {
+          set roots $args
+          foreach t {TMPDIR TMP} {
+            if {![catch {set t [set ::env($t)]}]} {
+              lappend roots $t
+            }
+          }
+          lappend roots /tmp
+          foreach r $roots {
+            if {![catch {
+              set t [file join $r tmp.[expr {int(rand()*999999)}]]
+              file mkdir $t
+            }]} {
+              return $t
+            }
+          }
+          error "failed to create temporary directory $t"
+        }  
+
+
+        set tmpdir [set ::env(TMPDIR) [MakeTempDir]]
+
+
       }
 
 
-      while {[llength $pending]} {
-        foreach f [tpool::wait $executor $pending pending] {
-          set pending [lsearch -inline -all -not -exact $pending $f]
-          set return [tpool::get $executor $f]
-          set u [dict get $units [dict get $return -id]]
-          set name [dict get $u -name]
-          set id [dict get $u -id]
-          if {!$quiet} {
-            if {[dict get $return -code] == 0} {
-              puts "ok $id - $name"
-            } else {
-              puts "not ok $id - $name"
-              puts "  ---"
-              set lines [split [dict get $return -return] "\n"]
-              set r [lindex $lines 0]
-              if {[llength $lines] > 1} {set r "$r >>>"}
-              puts "  tags: [dict get $u -tags]"
-              puts "  source: [dict get $u -source]"
-              puts "  return: $r"
-              puts "  ..."
-            }
+      try {
+
+
+        Import $argv0
+
+
+        if {!$quiet} {
+          puts "TAP version 14"
+          puts "1..[dict size $units]"
+          foreach s $skipped {
+            set u [dict get $units $s]
+            puts "ok [dict get $u -id] - [dict get $u -name] # SKIP due to tagging"
           }
-          if {$logging} {
-            set stdout [dict get $return -stdout]
-            set stderr [dict get $return -stderr]
-            if {[llength $stdout] + [llength $stderr] > 0} {
-              puts stderr {}
-              puts stderr "- $name"
-              if {[llength $stdout] > 0} {
-                puts stderr "-- stdout:"
-                foreach line $stdout {puts stderr $line}
+        }
+
+
+        while {[llength $pending]} {
+          foreach f [tpool::wait $executor $pending pending] {
+            set pending [lsearch -inline -all -not -exact $pending $f]
+            set return [tpool::get $executor $f]
+            set u [dict get $units [dict get $return -id]]
+            set name [dict get $u -name]
+            set id [dict get $u -id]
+            if {!$quiet} {
+              if {[dict get $return -code] == 0} {
+                puts "ok $id - $name"
+              } else {
+                puts "not ok $id - $name"
+                puts "  ---"
+                set lines [split [dict get $return -return] "\n"]
+                set r [lindex $lines 0]
+                if {[llength $lines] > 1} {set r "$r >>>"}
+                puts "  tags: [dict get $u -tags]"
+                puts "  source: [dict get $u -source]"
+                puts "  return: $r"
+                puts "  ..."
               }
-              if {[llength $stderr] > 0} {
-                puts stderr "-- stderr:"
-                foreach line $stderr {puts stderr $line}
+            }
+            if {$logging} {
+              set stdout [dict get $return -stdout]
+              set stderr [dict get $return -stderr]
+              if {[llength $stdout] + [llength $stderr] > 0} {
+                puts stderr {}
+                puts stderr "- $name"
+                if {[llength $stdout] > 0} {
+                  puts stderr "-- stdout:"
+                  foreach line $stdout {puts stderr $line}
+                }
+                if {[llength $stderr] > 0} {
+                  puts stderr "-- stderr:"
+                  foreach line $stderr {puts stderr $line}
+                }
               }
             }
           }
         }
+
+
+      } finally {
+
+
+        if {$tmpdir != {false}} {file delete -force -- $tmpdir}
+
+
       }
 
 

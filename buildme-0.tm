@@ -10,8 +10,7 @@ namespace eval ::buildme {
   namespace export sandbox system
 
 
-
-  proc mktmpdir {args} {
+  proc MakeTempDir {args} {
     set roots $args
     foreach t {TMPDIR TMP} {
       if {![catch {set t [set ::env($t)]}]} {
@@ -21,7 +20,9 @@ namespace eval ::buildme {
     lappend roots /tmp
     foreach r $roots {
       if {![catch {
-        set t [file join $r [file rootname [file tail [info script]]].[expr {int(rand()*999999)}]]
+        set prefix [file rootname [file tail [info script]]]
+        if {$prefix == {}} {set prefix tmp}
+        set t [file join $r $prefix.[expr {int(rand()*999999)}]]
         file mkdir $t
       }]} {
         return $t
@@ -31,13 +32,9 @@ namespace eval ::buildme {
   }
 
 
-  proc rmdir {dir} {
-    file delete -force -- $dir
-  }
-
-
   proc sandbox {code} {
-    set dir [mktmpdir]
+    set dir [MakeTempDir]
+    puts [info script]
     try {
       set wd [pwd]
       try {
@@ -52,7 +49,9 @@ namespace eval ::buildme {
         cd $wd
       }
     } finally {
-      rmdir $dir
+      if {[catch {file delete -force -- $dir}]} {
+        puts stderr "failed to delete temporary directory $dir
+      }
     }
   }
 
