@@ -393,16 +393,15 @@ namespace eval ::testme {
         }
 
 
-        proc execute {id unit code} {
+        proc process-unit {unit} {
           variable stdout [list]
           variable stderr [list]
           interp create unit
           try {
             interp alias unit puts {} puts
             unit eval tcl::tm::path add {*}[tcl::tm::path list]
-            unit eval "set unit {$unit}"
-            catch {unit eval $code} return opts
-            return [dict merge $opts [dict create -return $return -stdout $stdout -stderr $stderr -id $id]]
+            catch {unit eval "apply {{unit} {[dict get $unit -code]}} {$unit}"} return opts
+            return [dict merge $opts [dict create -return $return -stdout $stdout -stderr $stderr -id [dict get $unit -id]]]
           } finally {
             interp delete unit
           }
@@ -466,9 +465,10 @@ namespace eval ::testme {
         catch {set name [dict get $opts -name]}
         catch {set tags [dict get $opts -tags]}
         set tags [lsearch -inline -all -not -exact $tags {}]; # Squeeze out empty {} tags
-        dict set units $id [dict create -name $name -tags $tags -code $code -id $id -source $::argv0]
+        set unit [dict create -name $name -tags $tags -code $code -id $id -source $::argv0]
+        dict set units $id $unit
         if {([llength ${+tags}] == 0 || [llength [intersection ${+tags} $tags]] > 0) && [llength [intersection ${-tags} $tags]] == 0} {
-          lappend pending [tpool::post $executor "execute $id {-name {$name} -tags {$tags}} {$code}"]
+          lappend pending [tpool::post $executor "process-unit {$unit}"]
         } else {
           lappend skipped $id
         }
