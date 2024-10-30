@@ -286,6 +286,9 @@ namespace eval ::testme {
       set tmpdir false
 
 
+      set premature false
+
+
       set jobs 0
 
 
@@ -293,6 +296,7 @@ namespace eval ::testme {
         {{--jobs= -j=} -info "set maximum number of spawned threads" -default 0 -slot jobs}
         {{-l --logging} -info "send unit logging information to stderr" -default true -slot logging}
         {{-T --tmpdir} -info "manage \$TMPDIR contents" -default true -slot tmpdir}
+        {{-e --early} -info "early bail out on first failure" -default true -slot premature}
         {{-q --quiet} -info "suppress TAP output to stdout" -default true -slot quiet}
         {{-h --help} -info "print help" -apply {
           puts stderr "usage: $::argv0 {-f --flag --opt=arg --opt arg -opt arg ...} {--} {tag +tag -tag ...}"
@@ -555,6 +559,7 @@ namespace eval ::testme {
                 }
               }
             }
+            if {$premature && [dict get $return -code] != 0} {error "bailing out on failure"}
           }
         }
 
