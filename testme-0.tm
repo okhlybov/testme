@@ -45,7 +45,7 @@ namespace eval ::testme {
       ### CLIP code
 
 
-      package require Tcl 8.6
+      # package require Tcl 8.6
 
 
       namespace eval ::clip {
@@ -465,7 +465,7 @@ namespace eval ::testme {
         catch {set name [dict get $opts -name]}
         catch {set tags [dict get $opts -tags]}
         set tags [lsearch -inline -all -not -exact $tags {}]; # Squeeze out empty {} tags
-        set unit [dict create -name $name -tags $tags -code $code -id $id -source $::argv0]
+        set unit [dict create {*}$opts -name $name -tags $tags -code $code -id $id -source $::argv0]
         dict set units $id $unit
         if {([llength ${+tags}] == 0 || [llength [intersection ${+tags} $tags]] > 0) && [llength [intersection ${-tags} $tags]] == 0} {
           lappend pending [tpool::post $executor "process-unit {$unit}"]
