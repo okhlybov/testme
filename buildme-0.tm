@@ -1,7 +1,7 @@
 # https://github.com/okhlybov/testme
 
 
-package require Tcl 8.6
+package require Tcl
 
 
 namespace eval ::buildme {
@@ -11,6 +11,7 @@ namespace eval ::buildme {
 
 
   proc MakeTempDir {args} {
+    upvar 1 unit unit
     set roots $args
     foreach t {TMPDIR TMP} {
       if {![catch {set t [set ::env($t)]}]} {
@@ -20,45 +21,44 @@ namespace eval ::buildme {
     lappend roots /tmp
     foreach r $roots {
       if {![catch {
-        set prefix [file rootname [file tail [info script]]]
-        if {$prefix == {}} {set prefix tmp}
+        set prefix [file rootname [file tail [dict get $unit -source]]]
         set t [file join $r $prefix.[expr {int(rand()*999999)}]]
         file mkdir $t
-      }]} {
-        return $t
-      }
+      }]} {return $t}
     }
     error "failed to create temporary directory $t"
   }
 
 
   proc sandbox {code} {
+    upvar 1 unit unit
     set dir [MakeTempDir]
-    puts [info script]
     try {
-      set wd [pwd]
-      try {
-        foreach p [glob -nocomplain * .*] {
-          if {$p != {.} && $p != {..}} {
-            file copy -force -- $p $dir
-          }
+      foreach p [glob -nocomplain -directory [dict get $unit -stage] * .*] {
+        set last [lindex [file split $p] end]
+        if {$last != "." && $last != ".."} {
+          file copy -force -- $p $dir
         }
-        cd $dir
-        eval $code
-      } finally {
-        cd $wd
       }
+      # Can't cd into stage dir in multithreaded environment where all threads have the same current directory
+      dict set unit -stage $dir
+      eval $code
     } finally {
-      if {[catch {file delete -force -- $dir}]} {
-        puts stderr "failed to delete temporary directory $dir
+      if {[dict get $unit -cleanup]} {
+        if {[catch {file delete -force -- $dir}]} {
+          puts stderr "failed to delete temporary directory $dir
+        }
       }
     }
   }
 
 
-  proc system {cmd} {
-    puts stdout $cmd
-    if {[catch {exec -ignorestderr $::env(SHELL) -c $cmd 2>@1} result opts]} {
+  proc shell {cmd} {
+    upvar 1 unit unit
+    set stage [dict get $unit -stage]
+    set cd "cd \"$stage\""
+    puts stdout "$cd && \\\n$cmd"
+    if {[catch {exec -ignorestderr $::env(SHELL) -c "$cd && $cmd" 2>@1} result opts]} {
       puts stderr $result
     } else {
       puts stdout $result

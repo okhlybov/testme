@@ -1,7 +1,7 @@
 # https://github.com/okhlybov/testme
 
 
-package require Tcl 8.6
+package require Tcl
 
 
 package require Thread
@@ -277,25 +277,29 @@ namespace eval ::testme {
       }
 
 
-      set logging false
+      variable logging false
 
 
-      set quiet false
+      variable quiet false
 
 
-      set tmpdir false
+      variable tmpdir false
 
 
-      set premature false
+      variable premature false
 
 
-      set jobs 0
+      variable cleanup true
+
+      
+      variable jobs 0
 
 
       set opts {
         {{--jobs= -j=} -info "set maximum number of spawned threads" -default 0 -slot jobs}
         {{-l --logging} -info "send unit logging information to stderr" -default true -slot logging}
         {{-T --tmpdir} -info "manage \$TMPDIR contents" -default true -slot tmpdir}
+        {{-K --no-cleanup} -info "keep temporary dirs/files" -default false -slot cleanup}
         {{-e --early} -info "early bail out on first failure" -default true -slot premature}
         {{-q --quiet} -info "suppress TAP output to stdout" -default true -slot quiet}
         {{-h --help} -info "print help" -apply {
@@ -455,6 +459,7 @@ namespace eval ::testme {
         variable units
         variable +tags
         variable -tags
+        variable cleanup
         variable id
         set s [llength $args]
         if {$s < 1 || $s % 2 == 0} {error "usage: testme::unit ?-name ...? ?-tags ...? {...}"}
@@ -465,7 +470,7 @@ namespace eval ::testme {
         catch {set name [dict get $opts -name]}
         catch {set tags [dict get $opts -tags]}
         set tags [lsearch -inline -all -not -exact $tags {}]; # Squeeze out empty {} tags
-        set unit [dict create {*}$opts -name $name -tags $tags -code $code -id $id -source $::argv0]
+        set unit [dict create {*}$opts -stage [pwd] -name $name -tags $tags -code $code -id $id -source $::argv0 -cleanup $cleanup]
         dict set units $id $unit
         if {([llength ${+tags}] == 0 || [llength [intersection ${+tags} $tags]] > 0) && [llength [intersection ${-tags} $tags]] == 0} {
           lappend pending [tpool::post $executor "process-unit {$unit}"]
@@ -501,6 +506,8 @@ namespace eval ::testme {
 
         set tmpdir [set ::env(TMPDIR) [MakeTempDir]]
 
+
+        if {$logging} {puts stderr "created temporary directory $tmpdir"}
 
       }
 
@@ -567,7 +574,10 @@ namespace eval ::testme {
       } finally {
 
 
-        if {$tmpdir != {false}} {file delete -force -- $tmpdir}
+        if {$cleanup && $tmpdir != {false}} {
+          file delete -force -- $tmpdir
+          if {$logging} {puts stderr "removed temporary directory $tmpdir"}
+        }
 
 
       }
