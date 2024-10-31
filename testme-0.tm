@@ -608,6 +608,14 @@ namespace eval ::testme {
 
 
   ### Custom code which slurped the testme package's code
+  
+  
+  proc with {var list code} {
+    upvar 1 $var v
+    if {[catch {set v}]} {set v [list]}
+    set list [concat $v $list]
+    apply [list $var $code] $list
+  }
 
 
 }
