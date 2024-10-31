@@ -277,13 +277,13 @@ namespace eval ::testme {
       }
 
 
-      variable logging false
+      variable verbose false
 
 
       variable quiet false
 
 
-      variable tmpdir false
+      variable staging false
 
 
       variable premature false
@@ -296,12 +296,12 @@ namespace eval ::testme {
 
 
       set opts {
-        {{--jobs= -j=} -info "set maximum number of spawned threads" -default 0 -slot jobs}
-        {{-l --logging} -info "send unit logging information to stderr" -default true -slot logging}
-        {{-T --tmpdir} -info "manage \$TMPDIR contents" -default true -slot tmpdir}
-        {{-K --no-cleanup} -info "keep temporary dirs/files" -default false -slot cleanup}
-        {{-e --early} -info "early bail out on first failure" -default true -slot premature}
-        {{-q --quiet} -info "suppress TAP output to stdout" -default true -slot quiet}
+        {{--jobs= -j=} -info "set maximum number of allowed threads" -default 0 -slot jobs}
+        {{-v --verbose} -info "dump unit output to standard error channel" -default true -slot verbose}
+        {{-T --staging} -info "manage staging directory in \$TMPDIR" -default true -slot staging}
+        {{-K --keep} -info "keep temporary directories & files" -default false -slot cleanup}
+        {{-e --bailout} -info "bail out on first failure" -default true -slot premature}
+        {{-q --quiet} -info "suppress TAP output to standard output channel" -default true -slot quiet}
         {{-h --help} -info "print help" -apply {
           puts stderr "usage: $::argv0 {-f --flag --opt=arg --opt arg -opt arg ...} {--} {tag +tag -tag ...}"
           puts stderr {}
@@ -481,12 +481,12 @@ namespace eval ::testme {
       }
 
 
-      if {$tmpdir} {
+      if {$staging} {
 
 
         proc MakeTempDir {args} {
           set roots $args
-          foreach t {TMPDIR TMP} {
+          foreach t {staging TMP} {
             if {![catch {set t [set ::env($t)]}]} {
               lappend roots $t
             }
@@ -504,10 +504,10 @@ namespace eval ::testme {
         }  
 
 
-        set tmpdir [set ::env(TMPDIR) [MakeTempDir]]
+        set staging [set ::env(TMPDIR) [MakeTempDir]]
 
 
-        if {$logging} {puts stderr "created temporary directory $tmpdir"}
+        if {$verbose} {puts stderr "created temporary directory $staging"}
 
       }
 
@@ -550,7 +550,7 @@ namespace eval ::testme {
                 puts "  ..."
               }
             }
-            if {$logging} {
+            if {$verbose} {
               set stdout [dict get $return -stdout]
               set stderr [dict get $return -stderr]
               if {[llength $stdout] + [llength $stderr] > 0} {
@@ -574,9 +574,9 @@ namespace eval ::testme {
       } finally {
 
 
-        if {$cleanup && $tmpdir != {false}} {
-          file delete -force -- $tmpdir
-          if {$logging} {puts stderr "removed temporary directory $tmpdir"}
+        if {$cleanup && $staging != {false}} {
+          file delete -force -- $staging
+          if {$verbose} {puts stderr "removed temporary directory $staging"}
         }
 
 
@@ -587,7 +587,7 @@ namespace eval ::testme {
 
 
     } on error {result opts} {
-      if {$logging} {puts stderr [dict get $opts -errorinfo]}
+      if {$verbose} {puts stderr [dict get $opts -errorinfo]}
       if {!$quiet} {puts "Bail out!"}
       exit 1
     }
