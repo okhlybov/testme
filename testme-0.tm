@@ -566,6 +566,8 @@ namespace eval ::testme {
                 }
               }
             }
+            flush stdout
+            flush stderr
             if {$premature && [dict get $return -code] != 0} {error "bailing out on failure"}
           }
         }
