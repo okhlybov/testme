@@ -577,8 +577,11 @@ namespace eval ::testme {
 
 
         if {$cleanup && $staging != {false}} {
-          file delete -force -- $staging
-          if {$verbose} {puts stderr "removed temporary directory $staging"}
+          if {[catch {file delete -force -- $staging}]} {
+            if {$verbose} {puts stderr "failed to remove temporary directory $staging"}
+          } else {
+            if {$verbose} {puts stderr "removed temporary directory $staging"}
+          }
         }
 
 
