@@ -21,8 +21,8 @@ namespace eval ::testme {
       box eval set ::argv0 [file normalize $source]
       box eval set ::nesting [incr $::nesting -1]
       box eval {
-        cd [file dirname $argv0]
-        source [file tail $argv0]
+        cd [file dirname $::argv0]
+        source [file tail $::argv0]
       }
     } finally {
       interp delete box
@@ -318,7 +318,7 @@ namespace eval ::testme {
 
 
       if {[catch {
-        if {[llength $argv]} {set argv [clip::parse $argv $opts]}
+        if {[llength $::argv]} {set ::argv [clip::parse $::argv $opts]}
       } return]} {
         puts stderr $return
         exit 1
@@ -339,7 +339,7 @@ namespace eval ::testme {
       set -tags [list]
 
 
-      foreach arg $argv {
+      foreach arg $::argv {
         switch -glob $arg {
           +* {lappend +tags [string trimleft $arg +]}
           -* {lappend -tags [string trimleft $arg -]}
@@ -520,7 +520,7 @@ namespace eval ::testme {
       try {
 
 
-        Import $argv0
+        Import $::argv0
 
 
         if {!$quiet} {
@@ -614,7 +614,7 @@ namespace eval ::testme {
 
   if {$::nesting != 0} {
     set wd [pwd]
-    foreach source [glob -nocomplain [file join * [file tail $argv0]]] {
+    foreach source [glob -nocomplain [file join * [file tail $::argv0]]] {
       try {Import $source} finally {cd $wd}
     }
   }
