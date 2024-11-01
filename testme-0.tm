@@ -317,7 +317,12 @@ namespace eval ::testme {
       }
 
 
-      if {[llength $argv]} {set argv [clip::parse $argv $opts]}
+      if {[catch {
+        if {[llength $argv]} {set argv [clip::parse $argv $opts]}
+      } return]} {
+        puts stderr $return
+        exit 1
+      }
 
 
       # TODO
@@ -591,8 +596,11 @@ namespace eval ::testme {
       exit 0
 
 
-    } on error {result opts} {
-      if {$verbose} {puts stderr [dict get $opts -errorinfo]}
+    } on error {return opts} {
+      if {$verbose} {
+        puts stderr $return
+        puts stderr [dict get $opts -errorinfo]
+      }
       if {!$quiet} {puts "Bail out!"}
       exit 1
     }
