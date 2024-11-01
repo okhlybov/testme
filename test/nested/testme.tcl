@@ -6,3 +6,6 @@ namespace import testme::*
 
 # Blank unit
 unit {}
+
+# Skipped unit
+unit {skip N/A}

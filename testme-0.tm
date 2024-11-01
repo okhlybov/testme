@@ -402,12 +402,18 @@ namespace eval ::testme {
         }
 
 
+        proc skip {{message {}}} {
+          return -code 5 -level 0 $message
+        }
+
+
         proc process-unit {unit} {
           variable stdout [list]
           variable stderr [list]
           interp create unit
           try {
             interp alias unit puts {} puts
+            interp alias unit skip {} skip
             unit eval tcl::tm::path add {*}[tcl::tm::path list]
             catch {unit eval "apply {{unit} {[dict get $unit -code]}} {$unit}"} return opts
             return [dict merge $opts [dict create -return $return -stdout $stdout -stderr $stderr -id [dict get $unit -id]]]
@@ -541,18 +547,20 @@ namespace eval ::testme {
             set name [dict get $u -name]
             set id [dict get $u -id]
             if {!$quiet} {
-              if {[dict get $return -code] == 0} {
-                puts "ok $id - $name"
-              } else {
-                puts "not ok $id - $name"
-                puts "  ---"
-                set lines [split [dict get $return -return] "\n"]
-                set r [lindex $lines 0]
-                if {[llength $lines] > 1} {set r "$r >>>"}
-                puts "  tags: [dict get $u -tags]"
-                puts "  source: [dict get $u -source]"
-                puts "  return: $r"
-                puts "  ..."
+              switch [dict get $return -code] {
+                0 {puts "ok $id - $name"}
+                5 {puts "ok $id - $name # SKIP [dict get $return -return]"}
+                default {
+                  puts "not ok $id - $name"
+                  puts "  ---"
+                  set lines [split [dict get $return -return] "\n"]
+                  set r [lindex $lines 0]
+                  if {[llength $lines] > 1} {set r "$r >>>"}
+                  puts "  tags: [dict get $u -tags]"
+                  puts "  source: [dict get $u -source]"
+                  puts "  return: $r"
+                  puts "  ..."
+                }
               }
             }
             if {$verbose} {
