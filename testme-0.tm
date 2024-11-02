@@ -402,9 +402,7 @@ namespace eval ::testme {
         }
 
 
-        proc skip {{message {}}} {
-          return -code 5 -level 0 $message
-        }
+        proc skip {{reason {}}} {return -code 1073741823 -level 0 $reason}
 
 
         proc process-unit {unit} {
@@ -497,7 +495,7 @@ namespace eval ::testme {
 
         proc MakeTempDir {args} {
           set roots $args
-          foreach t {staging TMP} {
+          foreach t {TMPDIR TMP} {
             if {![catch {set t [set ::env($t)]}]} {
               lappend roots $t
             }
@@ -505,7 +503,7 @@ namespace eval ::testme {
           lappend roots /tmp
           foreach r $roots {
             if {![catch {
-              set t [file join $r tmp.[expr {int(rand()*999999)}]]
+              set t [file join $r [expr {int(rand()*999999)}]]
               file mkdir $t
             }]} {
               return $t
@@ -549,7 +547,7 @@ namespace eval ::testme {
             if {!$quiet} {
               switch [dict get $return -code] {
                 0 {puts "ok $id - $name"}
-                5 {puts "ok $id - $name # SKIP [dict get $return -return]"}
+                1073741823 {puts "ok $id - $name # SKIP [dict get $return -return]"}
                 default {
                   puts "not ok $id - $name"
                   puts "  ---"

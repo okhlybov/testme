@@ -7,7 +7,7 @@ package require Tcl
 namespace eval ::buildme {
   
 
-  namespace export sandbox system
+  namespace export sandbox shell
 
 
   proc MakeTempDir {args} {
