@@ -1,11 +1,9 @@
-::tcl::tm::add [file join [file dirname [info script]] .. ..]
+tcl::tm::add [file normalize [file join [file dirname [info script]] .. ..]]
 
 package require testme
 
-namespace import testme::*
-
 # Blank unit
-unit {}
+testme::unit {}
 
 # Skipped unit
-unit {skip N/A}
+testme::unit {skip N/A}

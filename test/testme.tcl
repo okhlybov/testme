@@ -1,4 +1,4 @@
-::tcl::tm::add [file join [file dirname [info script]] ..]
+tcl::tm::add [file normalize [file join [file dirname [info script]] ..]]
 
 package require testme
 
