@@ -10,7 +10,7 @@
 # SPDX-FileCopyrightText: (C) Eric S. Raymond <esr@thyrsus.com>
 # SPDX-License-Identifier: MIT-0
 #
-# This version shipped on 2024-05-26.
+# This version shipped on 2024-10-23.
 #
 # A newer version may be available at https://gitlab.com/esr/tapview;
 # check the ship date against the commit list there to see if it
@@ -152,7 +152,7 @@ do
 	[0123456789]*)
 	    case "$tok1" in
 		1[.][.]*) 
-		    if [ "$(context_get plan)" != "" ]
+		    if [ "$(context_get plan)" != "" ] && [ "$requireplan" = yes ] 
 		    then
 			ship_error "tapview: cannot have more than one plan line."
 		    fi
