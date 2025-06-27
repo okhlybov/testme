@@ -571,7 +571,7 @@ namespace eval ::testme {
                 }
               }
             }
-            if {$verbose && ($full || $outcome == {failed})} {
+            if {$verbose && ($full || $outcome eq {failed})} {
               set stdout [dict get $return -stdout]
               set stderr [dict get $return -stderr]
               if {[llength $stdout] + [llength $stderr] > 0} {
@@ -589,7 +589,23 @@ namespace eval ::testme {
             }
             flush stdout
             flush stderr
-            if {$premature && [dict get $return -code] != 0} {error "bailing out on failure"}
+            if {!$cleanup} {
+              # Writing channels contents to log files makes no sense unless staging directory is preserved for inspection
+              foreach x {stdout stderr} {
+                set s [dict get $return -$x]
+                if {[llength $s] > 0} {
+                  try {
+                    set f [open $x.out w]
+                    try {
+                      foreach t $s {puts $f $t}
+                    } finally {
+                      close $f
+                    }
+                  }
+                }
+              }
+            }
+            if {$premature && $outcome eq {failed}} {error "bailing out on failure"}
           }
         }
 
@@ -597,7 +613,7 @@ namespace eval ::testme {
       } finally {
 
 
-        if {$cleanup && !$staging} {
+        if {$cleanup && $staging ne {false}} {
           if {[catch {file delete -force -- $staging}]} {
             if {$verbose} {puts stderr "failed to remove temporary directory $staging"}
           } else {
