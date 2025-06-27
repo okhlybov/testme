@@ -1,6 +1,5 @@
-# testme - a Tcl pico test suite
-
-Testme is a test suite for the [Tcl](https://www.tcl.tk/) language.
+# testme - a Tcl testing pico framework
+Testme is a testing framework for the [Tcl](https://www.tcl.tk/) language.
 
 ## Features
 
@@ -156,6 +155,6 @@ The very purpose for this command pair is to aid in executing external commands 
 
 
 
-**Happy testing && have fun!**
+**Happy testing & have fun!**
 
 Oleg A. Khlybov <fougas@mail.ru>
