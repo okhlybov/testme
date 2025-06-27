@@ -1,3 +1,4 @@
+# Testme - a testing pico framework for Tcl
 # https://github.com/okhlybov/testme
 
 
@@ -280,6 +281,9 @@ namespace eval ::testme {
       variable verbose false
 
 
+      variable full false
+
+
       variable quiet false
 
 
@@ -298,6 +302,7 @@ namespace eval ::testme {
       set opts {
         {{--jobs= -j=} -info "set maximum number of allowed threads" -default 0 -slot jobs}
         {{-v --verbose} -info "dump unit output to standard error channel" -default true -slot verbose}
+        {{-F --full-dump} -info "dump unit output for succeeded tests as well" -default true -slot full}
         {{-T --staging} -info "manage staging directory in \$TMPDIR" -default true -slot staging}
         {{-K --keep} -info "keep temporary directories & files" -default false -slot cleanup}
         {{-e --bailout} -info "bail out on first failure" -default true -slot premature}
@@ -405,7 +410,7 @@ namespace eval ::testme {
         proc skip {{reason {}}} {return -code 1073741823 -level 0 $reason}
 
 
-        proc process-unit {unit} {
+        proc process {unit} {
           variable stdout [list]
           variable stderr [list]
           interp create unit
@@ -482,7 +487,7 @@ namespace eval ::testme {
         set unit [dict create {*}$opts -stage [pwd] -name $name -tags $tags -code $code -id $id -source $::argv0 -cleanup $cleanup]
         dict set units $id $unit
         if {([llength ${+tags}] == 0 || [llength [intersection ${+tags} $tags]] > 0) && [llength [intersection ${-tags} $tags]] == 0} {
-          lappend pending [tpool::post $executor "process-unit {$unit}"]
+          lappend pending [tpool::post $executor "process {$unit}"]
         } else {
           lappend skipped $id
         }
@@ -544,11 +549,16 @@ namespace eval ::testme {
             set u [dict get $units [dict get $return -id]]
             set name [dict get $u -name]
             set id [dict get $u -id]
+            switch [dict get $return -code] {
+              0 {set outcome succeeded}
+              1073741823 {set outcome skipped}
+              default {set outcome failed}
+            }
             if {!$quiet} {
-              switch [dict get $return -code] {
-                0 {puts "ok $id - $name"}
-                1073741823 {puts "ok $id - $name # SKIP [dict get $return -return]"}
-                default {
+              switch $outcome {
+                succeeded {puts "ok $id - $name"}
+                skipped {puts "ok $id - $name # SKIP [dict get $return -return]"}
+                failed {
                   puts "not ok $id - $name"
                   puts "  ---"
                   set lines [split [dict get $return -return] "\n"]
@@ -561,7 +571,7 @@ namespace eval ::testme {
                 }
               }
             }
-            if {$verbose} {
+            if {$verbose && ($full || $outcome == {failed})} {
               set stdout [dict get $return -stdout]
               set stderr [dict get $return -stderr]
               if {[llength $stdout] + [llength $stderr] > 0} {
@@ -587,7 +597,7 @@ namespace eval ::testme {
       } finally {
 
 
-        if {$cleanup && $staging != {false}} {
+        if {$cleanup && !$staging} {
           if {[catch {file delete -force -- $staging}]} {
             if {$verbose} {puts stderr "failed to remove temporary directory $staging"}
           } else {
