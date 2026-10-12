@@ -276,7 +276,7 @@ namespace eval ::testme {
             interp alias unit puts {} puts
             interp alias unit skip {} skip
             # The unit layer facade: the auxiliary helpers without the driving machinery
-            unit eval [list package ifneeded testme $::testme_version [list package provide testme $::testme_version]]
+            unit eval [list package ifneeded testme $::testme::version [list package provide testme $::testme::version]]
             unit eval {
               namespace eval ::testme {namespace export with}
               proc ::testme::with {var list code} {
@@ -298,7 +298,7 @@ namespace eval ::testme {
       }
 
 
-      variable executor [tpool::create -maxworkers $jobs -initcmd "$paths; [list set ::testme_version $version]; $static;"]
+      variable executor [tpool::create -maxworkers $jobs -initcmd "$paths; [list namespace eval ::testme [list set version $version]]; $static;"]
 
 
       variable pending [list]
