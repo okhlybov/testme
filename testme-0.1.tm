@@ -2,9 +2,31 @@
 # https://github.com/okhlybov/testme
 
 
-package require Tcl 8.6
+package require Tcl 8.6-
 
 
+if {[catch {package present Thread}] && [catch {package present thread}] &&
+    ![llength [package versions Thread]] && ![llength [package versions thread]]} {
+  set found ""
+  if {[info exists ::env(TESTME_THREAD_DIR)] && [file isfile [file join $::env(TESTME_THREAD_DIR) pkgIndex.tcl]]} {
+    set found $::env(TESTME_THREAD_DIR)
+  } else {
+    foreach base [list [info library] [file dirname [info library]]] {
+      foreach c [glob -nocomplain -directory $base -types d *thread*] {
+        if {[file isfile [file join $c pkgIndex.tcl]]} {
+          set found $c
+          break
+        }
+      }
+      if {$found ne ""} {break}
+    }
+  }
+  if {$found ne ""} {
+    set dir $found
+    catch {source [file join $found pkgIndex.tcl]}
+    set ::env(TESTME_THREAD_DIR) $found
+  }
+}
 package require Thread
 
 
@@ -47,7 +69,8 @@ namespace eval ::testme {
       }
       interp alias $box ::testme::unit {} ::testme::unit
       interp alias $box ::testme::nest {} ::testme::Nest
-      $box eval {namespace eval ::testme {namespace export unit}}
+      interp alias $box ::testme::DetectCores {} ::testme::DetectCores
+      $box eval {namespace eval ::testme {namespace export unit DetectCores}}
       $box eval set ::argv0 $norm
       $box eval [list set ::ancestors $path]
       foreach {name default} $fields {
@@ -73,7 +96,7 @@ namespace eval ::testme {
   proc Nest {dir {path {}}} {
     set wd [pwd]
     foreach source [glob -nocomplain -directory $dir [file join * [file tail $::argv0]]] {
-      set norm [file normalize $source]
+      set norm [file normalize [string range $source 0 end]]
       if {[lsearch -exact $path $norm] >= 0} {continue}
       try {
         Import $source [linsert $path end $norm]
@@ -88,6 +111,58 @@ namespace eval ::testme {
   }
 
 
+  proc DetectCores {} {
+    if {[info exists ::env(TESTME_JOBS)] && [string is integer -strict $::env(TESTME_JOBS)] && $::env(TESTME_JOBS) > 0} {
+      return $::env(TESTME_JOBS)
+    }
+    if {[info exists ::env(NUMBER_OF_PROCESSORS)] && [string is integer -strict $::env(NUMBER_OF_PROCESSORS)] && $::env(NUMBER_OF_PROCESSORS) > 0} {
+      return $::env(NUMBER_OF_PROCESSORS)
+    }
+    if {[file readable /sys/devices/system/cpu/online]} {
+      if {![catch {
+        set f [open /sys/devices/system/cpu/online r]
+        try {
+          set line [string trim [read $f]]
+        } finally {
+          close $f
+        }
+        set count 0
+        foreach range [split $line ,] {
+          if {[regexp {^(\d+)-(\d+)$} $range ~ start end]} {
+            incr count [expr {$end - $start + 1}]
+          } elseif {[string is integer -strict $range]} {
+            incr count
+          }
+        }
+        if {$count > 0} {return $count}
+      }]} {}
+    }
+    if {[file readable /proc/cpuinfo]} {
+      if {![catch {
+        set f [open /proc/cpuinfo r]
+        try {
+          set data [read $f]
+        } finally {
+          close $f
+        }
+        set count [llength [regexp -all -line -inline {^processor\s*:} $data]]
+        if {$count > 0} {return $count}
+      }]} {}
+    }
+    foreach sysctl_cmd {{sysctl -n hw.logicalcpu} {sysctl -n hw.ncpu}} {
+      if {![catch {exec {*}$sysctl_cmd} n] && [string is integer -strict $n] && $n > 0} {
+        return $n
+      }
+    }
+    foreach cmd {{nproc} {getconf _NPROCESSORS_ONLN}} {
+      if {![catch {exec {*}$cmd} n] && [string is integer -strict $n] && $n > 0} {
+        return $n
+      }
+    }
+    return 4
+  }
+
+
   ### Toplevel code
 
 
@@ -97,44 +172,27 @@ namespace eval ::testme {
   try {set ::ancestors} on error {} {
 
 
-    if {![info exists ::argv0] || ![file isfile [file normalize $::argv0]]} {
+    if {![info exists ::argv0] || $::argv0 eq {} ||
+        [file normalize $::argv0] eq [file normalize [info nameofexecutable]] ||
+        ![file isfile [file normalize $::argv0]]} {
       error {testme must be required by a test suite script being executed (invalid ::argv0)}
     }
 
 
-    package require platform
+    variable verbose false
+    variable full false
+    variable quiet false
+    variable staging false
+    variable premature false
+    variable cleanup true
+    variable jobs 0
+    variable failures 0
 
 
     try {
 
 
-
-
       package require clip
-
-
-      variable verbose false
-
-
-      variable full false
-
-
-      variable quiet false
-
-
-      variable staging false
-
-
-      variable premature false
-
-
-      variable cleanup true
-
-      
-      variable jobs 0
-
-
-      variable failures 0
 
 
       set opts {
@@ -168,13 +226,8 @@ namespace eval ::testme {
       }
 
 
-      # TODO
       if {$jobs == 0} {
-        set jobs 4
-        switch -glob [platform::identify] {
-          linux-* {catch {set jobs [exec nproc --all]}}
-          win32-* {catch {set jobs $env(NUMBER_OF_PROCESSORS)}}
-        }
+        set jobs [DetectCores]
       }
 
 
@@ -281,7 +334,24 @@ namespace eval ::testme {
                 return -code error {the unit code requested to terminate the process: exit}
               }
             }
-            interp alias unit puts {} Puts
+            interp alias unit CapturePuts {} Puts
+            unit eval {
+              rename puts ::tcl::puts
+              proc puts {args} {
+                set xargs $args
+                if {[llength $args] > 1 && [lindex $args 0] eq "-nonewline"} {
+                  set rest [lrange $args 1 end]
+                } else {
+                  set rest $args
+                }
+                set chan [expr {[llength $rest] == 1 ? "stdout" : [lindex $rest 0]}]
+                if {$chan eq "stdout" || $chan eq "stderr"} {
+                  CapturePuts {*}$xargs
+                } else {
+                  ::tcl::puts {*}$xargs
+                }
+              }
+            }
             interp alias unit skip {} Skip
             interp alias unit context {} Context
             # The unit layer facade: the auxiliary helpers without the driving machinery

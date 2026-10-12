@@ -2,7 +2,7 @@
 # https://github.com/okhlybov/testme
 
 
-package require Tcl 8.6
+package require Tcl 8.6-
 
 
 # Makes the sibling modules discoverable no matter how this one is loaded
@@ -190,7 +190,7 @@ namespace eval ::tapme {
 
 
 # CLI mode: consume a TAP stream from the standard input channel
-if {[info script] ne {} && [file normalize [info script]] eq [file normalize $::argv0]} {
+if {[info script] ne {} && [info exists ::argv0] && $::argv0 ne {} && [file normalize [info script]] eq [file normalize $::argv0]} {
 
 
   package provide tapme 0

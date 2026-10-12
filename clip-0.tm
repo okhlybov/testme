@@ -2,7 +2,7 @@
 # https://github.com/okhlybov/testme
 
 
-package require Tcl 8.6
+package require Tcl 8.6-
 
 
 namespace eval ::clip {

@@ -14,20 +14,22 @@ namespace eval ::buildme {
   proc MakeTempDir {args} {
     upvar 1 unit unit
     set roots $args
-    foreach t {TMPDIR TMP} {
-      if {![catch {set t [set ::env($t)]}]} {
-        lappend roots $t
+    foreach var {TMPDIR TMP} {
+      if {[info exists ::env($var)]} {
+        lappend roots $::env($var)
       }
     }
     lappend roots /tmp
-    foreach r $roots {
-      if {![catch {
-        set prefix [file rootname [file tail [dict get $unit -source]]]
-        set t [file join $r $prefix.[expr {int(rand()*999999)}]]
-        file mkdir $t
-      }]} {return $t}
+    set prefix "buildme"
+    if {[info exists unit] && [dict exists $unit -source]} {
+      set prefix [file rootname [file tail [dict get $unit -source]]]
     }
-    error "failed to create temporary directory $t"
+    set dir ""
+    foreach r $roots {
+      set dir [file join $r $prefix.[expr {int(rand()*999999)}]]
+      if {![catch {file mkdir $dir}]} {return $dir}
+    }
+    error "failed to create temporary directory $dir"
   }
 
 
@@ -35,17 +37,19 @@ namespace eval ::buildme {
     upvar 1 unit unit
     set dir [MakeTempDir]
     try {
-      foreach p [glob -nocomplain -directory [dict get $unit -stage] * .*] {
-        set last [lindex [file split $p] end]
-        if {$last != "." && $last != ".."} {
-          file copy -force -- $p $dir
+      if {[info exists unit] && [dict exists $unit -stage]} {
+        foreach p [lsort -unique [glob -nocomplain -directory [dict get $unit -stage] * .*]] {
+          set last [lindex [file split $p] end]
+          if {$last != "." && $last != ".."} {
+            file copy -force -- $p $dir
+          }
         }
       }
       # Can't cd into stage dir in multithreaded environment where all threads have the same current directory
-      dict set unit -stage $dir
-      eval $code
+      if {[info exists unit]} {dict set unit -stage $dir}
+      uplevel 1 $code
     } finally {
-      if {[dict get $unit -cleanup]} {
+      if {![info exists unit] || ![dict exists $unit -cleanup] || [dict get $unit -cleanup]} {
         if {[catch {file delete -force -- $dir}]} {
           puts stderr "failed to delete temporary directory $dir"
         }
