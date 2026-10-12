@@ -1,5 +1,5 @@
 # testme - a Tcl testing pico framework
-Testme is a testing framework for the [Tcl](https://www.tcl.tk/) language.
+Testme is a testing framework for the [Tcl](https://www.tcl-lang.org/) language.
 
 ## Features
 
@@ -32,6 +32,12 @@ Filter test suite output with an external TAP consumer
 tclsh test/testme.tcl | sh tapview
 ```
 
+Filter test suite output with the pure Tcl tapme consumer
+
+```shell
+tclsh test/testme.tcl | tclsh tapme-0.tm
+```
+
 Review Testme command line options
 
 ```shell
@@ -57,7 +63,7 @@ The Testme rigs for separation of TAP and unit outputs in the way that all TAP o
 tclsh test/testme.tcl -v 2> testme.log | sh tapview
 ```
 
-where the unit execution progress and test suite summarizing report is done by the `tapview` while all error reports and log flood are accumulated in the `testme.log` file. The `-q` flag can be used to suppress the default TAP output completely effectively silencing the Testme. Conversely, the Testme is configured to suppress both standard and error outputs coming from Testme itself as well as from the units' code blocks (this also includes critical Tcl code errors). The `-v` flag enables all kinds of error and logging floods dumped to the standard error channel.
+where the unit execution progress and test suite summarizing report is done by the `tapview` while all error reports and log flood are accumulated in the `testme.log` file. The `-q` flag suppresses the TAP output on the standard output channel; the run verdict is then reported on the standard error channel by the internal TAP consumer when the tapme package is available in the module path, or as a single summary line otherwise. Conversely, the Testme is configured to suppress both standard and error outputs coming from Testme itself as well as from the units' code blocks (this also includes critical Tcl code errors). The `-v` flag enables all kinds of error and logging floods dumped to the standard error channel.
 
 The default Testme behaviour is to execute all processed units that are not skipped in spite of encountered code errors or test failures, and to report the nested test suites whose processing failed as failed units as well. The `-e` flag can be used for bailing out on the first anomaly encountered, be it a unit failure or a suite processing error. *Skipping a unit is not considered a failure.*
 
