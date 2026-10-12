@@ -11,22 +11,89 @@ package require Thread
 namespace eval ::testme {
 
 
+  variable version
+  regexp -- {-(\d+(?:\.\d+)*)$} [file rootname [file tail [info script]]] ~ version
+
+
+  # The inter-level protocol record: field names with their defaults.
+  # The core fields ::argv0 & ::nesting are computed per level explicitly;
+  # every other field is propagated to the nested interpreters as-is, or
+  # seeded with its default when absent, ex. under a legacy driver which
+  # knows nothing about it. Extending the protocol takes adding a field
+  # right here and nothing else
+  variable fields {
+    ancestors {}
+    bailout false
+  }
+
+
   namespace export unit
 
 
   proc Import {source} {
     variable executor
-    interp create box
+    variable version
+    variable seq
+    variable fields
+    set norm [file normalize $source]
+    if {[lsearch -exact $::ancestors $norm] < 0} {lappend ::ancestors $norm}
+    set box box[incr seq]
+    interp create $box
     try {
-      interp alias box ::testme::unit {} ::testme::unit
-      box eval set ::argv0 [file normalize $source]
-      box eval set ::nesting [incr $::nesting -1]
-      box eval {
+      $box eval {
+        rename exit {}
+        proc exit {args} {
+          if {[llength $args]} {
+            return -code error "the suite code requested to terminate the process: exit $args"
+          }
+          return -code error {the suite code requested to terminate the process: exit}
+        }
+      }
+      interp alias $box ::testme::unit {} ::testme::unit
+      interp alias $box ::testme::nest {} ::testme::Nest
+      $box eval {namespace eval ::testme {namespace export unit}}
+      $box eval set ::argv0 $norm
+      $box eval set ::nesting [incr $::nesting -1]
+      foreach {name default} $fields {
+        if {[info exists ::$name]} {
+          $box eval [list set ::$name [set ::$name]]
+        } else {
+          $box eval [list set ::$name $default]
+        }
+      }
+      $box eval [list package ifneeded testme $version "[list ::testme::nest [file dirname $norm]]; [list package provide testme $version]"]
+      $box eval {
         cd [file dirname $::argv0]
         source [file tail $::argv0]
       }
     } finally {
-      interp delete box
+      interp delete $box
+    }
+  }
+
+
+  # Nested suite lookup & processing. Always executed by the driving
+  # interpreter of the enclosing level, be it the toplevel machinery or
+  # a self-loaded module copy within a legacy nesting level
+  proc Nest {dir} {
+    set wd [pwd]
+    foreach source [glob -nocomplain -directory $dir [file join * [file tail $::argv0]]] {
+      set source [file normalize $source]
+      if {[lsearch -exact $::ancestors $source] >= 0} {continue}
+      try {
+        Import $source
+      } on error {e o} {
+        # The fail fast policy: re-raise when bailing out is requested,
+        # otherwise contain the failure and let the run continue
+        if {[info exists ::bailout] && $::bailout} {
+          return -code error -errorinfo [dict get $o -errorinfo] $e
+        }
+        if {[llength [info commands ::testme::FailSuite]]} {
+          FailSuite $source $e
+        } else {
+          catch {puts stderr "failed to process suite $source: $e"}
+        }
+      } finally {cd $wd}
     }
   }
 
@@ -35,6 +102,11 @@ namespace eval ::testme {
 
 
   try {set ::nesting} on error {} {
+
+
+    if {![info exists ::argv0] || ![file isfile [file normalize $::argv0]]} {
+      error {testme must be required by a test suite script being executed (invalid ::argv0)}
+    }
 
 
     package require platform
@@ -319,6 +391,9 @@ namespace eval ::clip {
       variable jobs 0
 
 
+      variable failures 0
+
+
       set opts {
         {{--jobs= -j=} -info "set maximum number of allowed threads" -default 0 -slot jobs}
         {{-v --verbose} -info "dump unit output to standard error channel" -default true -slot verbose}
@@ -371,6 +446,15 @@ namespace eval ::clip {
           default {lappend +tags $arg}
         }
       }
+
+
+      variable fields
+      foreach {name default} $fields {
+        if {![info exists ::$name]} {set ::$name $default}
+      }
+
+
+      set ::bailout $premature
 
 
       set ::nesting -1
@@ -435,6 +519,15 @@ namespace eval ::clip {
           variable stderr [list]
           interp create unit
           try {
+            unit eval {
+              rename exit {}
+              proc exit {args} {
+                if {[llength $args]} {
+                  return -code error "the unit code requested to terminate the process: exit $args"
+                }
+                return -code error {the unit code requested to terminate the process: exit}
+              }
+            }
             interp alias unit puts {} puts
             interp alias unit skip {} skip
             unit eval tcl::tm::path add {*}[tcl::tm::path list]
@@ -456,6 +549,9 @@ namespace eval ::clip {
 
 
       variable skipped [list]
+
+
+      variable synthetic [list]
 
 
       variable units [dict create]
@@ -515,6 +611,96 @@ namespace eval ::clip {
       }
 
 
+      # Registers a failed nested suite as a synthetic failed unit, keeping
+      # the TAP plan consistent
+      proc FailSuite {source info} {
+        variable units
+        variable id
+        variable synthetic
+        dict set units $id [dict create -name "suite $source" -tags [list] -id $id -source $source]
+        lappend synthetic [dict create -code 1 -return $info -stdout [list] -stderr [list] -id $id]
+        incr id
+      }
+
+
+      # Reports a single unit result: TAP line, verbose channels dump, log files
+      proc Report {return} {
+        variable units
+        variable quiet
+        variable verbose
+        variable full
+        variable cleanup
+        variable staging
+        variable origin
+        variable failures
+        variable premature
+        set u [dict get $units [dict get $return -id]]
+        set name [dict get $u -name]
+        set id [dict get $u -id]
+        switch [dict get $return -code] {
+          0 {set outcome succeeded}
+          1073741823 {set outcome skipped}
+          default {set outcome failed}
+        }
+        if {$outcome eq {failed}} {incr failures}
+        if {!$quiet} {
+          switch $outcome {
+            succeeded {puts "ok $id - $name"}
+            skipped {puts "ok $id - $name # SKIP [dict get $return -return]"}
+            failed {
+              puts "not ok $id - $name"
+              puts "  ---"
+              set lines [split [dict get $return -return] "\n"]
+              set r [lindex $lines 0]
+              if {[llength $lines] > 1} {set r "$r >>>"}
+              puts "  tags: [dict get $u -tags]"
+              puts "  source: [dict get $u -source]"
+              puts "  return: $r"
+              puts "  ..."
+            }
+          }
+        }
+        if {$verbose && ($full || $outcome eq {failed})} {
+          set stdout [dict get $return -stdout]
+          set stderr [dict get $return -stderr]
+          if {[llength $stdout] + [llength $stderr] > 0} {
+            puts stderr {}
+            puts stderr "- $name"
+            if {[llength $stdout] > 0} {
+              puts stderr "-- stdout:"
+              foreach line $stdout {puts stderr $line}
+            }
+            if {[llength $stderr] > 0} {
+              puts stderr "-- stderr:"
+              foreach line $stderr {puts stderr $line}
+            }
+          }
+        }
+        flush stdout
+        flush stderr
+        if {!$cleanup} {
+          # Dumping channels contents into per-unit log files for post-mortem inspection
+          if {$staging ne {false}} {set logs $staging} else {set logs $origin}
+          set tag $name
+          regsub -all {\W} $tag {_} tag
+          foreach x {stdout stderr} {
+            set s [dict get $return -$x]
+            if {[llength $s] > 0} {
+              try {
+                set f [open [file join $logs "$id-$tag-$x.out"] w]
+                try {
+                  foreach t $s {puts $f $t}
+                } finally {
+                  close $f
+                }
+              }
+            }
+          }
+        }
+        if {$premature && $outcome eq {failed}} {error "bailing out on failure"}
+      }
+
+
       if {$staging} {
 
 
@@ -546,6 +732,9 @@ namespace eval ::clip {
       }
 
 
+      set origin [pwd]
+
+
       try {
 
 
@@ -565,69 +754,10 @@ namespace eval ::clip {
         while {[llength $pending]} {
           foreach f [tpool::wait $executor $pending pending] {
             set pending [lsearch -inline -all -not -exact $pending $f]
-            set return [tpool::get $executor $f]
-            set u [dict get $units [dict get $return -id]]
-            set name [dict get $u -name]
-            set id [dict get $u -id]
-            switch [dict get $return -code] {
-              0 {set outcome succeeded}
-              1073741823 {set outcome skipped}
-              default {set outcome failed}
-            }
-            if {!$quiet} {
-              switch $outcome {
-                succeeded {puts "ok $id - $name"}
-                skipped {puts "ok $id - $name # SKIP [dict get $return -return]"}
-                failed {
-                  puts "not ok $id - $name"
-                  puts "  ---"
-                  set lines [split [dict get $return -return] "\n"]
-                  set r [lindex $lines 0]
-                  if {[llength $lines] > 1} {set r "$r >>>"}
-                  puts "  tags: [dict get $u -tags]"
-                  puts "  source: [dict get $u -source]"
-                  puts "  return: $r"
-                  puts "  ..."
-                }
-              }
-            }
-            if {$verbose && ($full || $outcome eq {failed})} {
-              set stdout [dict get $return -stdout]
-              set stderr [dict get $return -stderr]
-              if {[llength $stdout] + [llength $stderr] > 0} {
-                puts stderr {}
-                puts stderr "- $name"
-                if {[llength $stdout] > 0} {
-                  puts stderr "-- stdout:"
-                  foreach line $stdout {puts stderr $line}
-                }
-                if {[llength $stderr] > 0} {
-                  puts stderr "-- stderr:"
-                  foreach line $stderr {puts stderr $line}
-                }
-              }
-            }
-            flush stdout
-            flush stderr
-            if {!$cleanup} {
-              # Writing channels contents to log files makes no sense unless staging directory is preserved for inspection
-              foreach x {stdout stderr} {
-                set s [dict get $return -$x]
-                if {[llength $s] > 0} {
-                  try {
-                    set f [open $x.out w]
-                    try {
-                      foreach t $s {puts $f $t}
-                    } finally {
-                      close $f
-                    }
-                  }
-                }
-              }
-            }
-            if {$premature && $outcome eq {failed}} {error "bailing out on failure"}
+            Report [tpool::get $executor $f]
           }
         }
+        foreach s $synthetic {Report $s}
 
 
       } finally {
@@ -645,14 +775,12 @@ namespace eval ::clip {
       }
 
 
-      exit 0
+      exit [expr {$failures ? 1 : 0}]
 
 
     } on error {return opts} {
-      if {$verbose} {
-        puts stderr $return
-        puts stderr [dict get $opts -errorinfo]
-      }
+      puts stderr $return
+      if {$verbose} {puts stderr [dict get $opts -errorinfo]}
       if {!$quiet} {puts "Bail out!"}
       exit 1
     }
@@ -665,8 +793,18 @@ namespace eval ::clip {
 
 
   if {$::nesting != 0} {
+    # Legacy path: reached only when this module copy is loaded by an
+    # older-generation driver which doesn't pre-register itself in this
+    # interpreter. Seed the protocol fields it knows nothing about with
+    # their roster defaults
+    variable fields
+    foreach {name default} $fields {
+      if {![info exists ::$name]} {set ::$name $default}
+    }
     set wd [pwd]
     foreach source [glob -nocomplain [file join * [file tail $::argv0]]] {
+      set source [file normalize $source]
+      if {[lsearch -exact $::ancestors $source] >= 0} {continue}
       try {Import $source} finally {cd $wd}
     }
   }

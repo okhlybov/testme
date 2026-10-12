@@ -59,9 +59,11 @@ tclsh test/testme.tcl -v 2> testme.log | sh tapview
 
 where the unit execution progress and test suite summarizing report is done by the `tapview` while all error reports and log flood are accumulated in the `testme.log` file. The `-q` flag can be used to suppress the default TAP output completely effectively silencing the Testme. Conversely, the Testme is configured to suppress both standard and error outputs coming from Testme itself as well as from the units' code blocks (this also includes critical Tcl code errors). The `-v` flag enables all kinds of error and logging floods dumped to the standard error channel.
 
-The default Testme behaviour is to execute all processed units that are not skipped in spite of encountered code errors or test failures. The `-e` flag can be used for bailing out on the first anomaly encountered. *Skipping a unit is not considered a failure.*
+The default Testme behaviour is to execute all processed units that are not skipped in spite of encountered code errors or test failures, and to report the nested test suites whose processing failed as failed units as well. The `-e` flag can be used for bailing out on the first anomaly encountered, be it a unit failure or a suite processing error. *Skipping a unit is not considered a failure.*
 
-The `-T` flag enables the management of a temporary directory for Testme and processed units. This includes creating a temporary directory, setting up the `TMPDIR` environment variable and deleting this directory after unit execution phase (unless the `-K` flag is also specified, which is intended to retain the unit-generated garbage). *Refer to the Buildme module below.*
+Upon completion, Testme exits with status 0 when all processed units succeeded, and with status 1 when at least one unit failed (bailing out included), making the suite suitable for driving from scripts and CI pipelines. Testme enforces no time limits on the units' execution; wrap the suite invocation into an external `timeout` command for the unattended runs.
+
+The `-T` flag enables the management of a temporary directory for Testme and processed units. This includes creating a temporary directory, setting up the `TMPDIR` environment variable and deleting this directory after unit execution phase (unless the `-K` flag is also specified, which is intended to retain the unit-generated garbage). With the `-K` flag specified, the captured standard and error outputs of each processed unit are additionally dumped into per-unit log files (`id-name-channel.out`) residing in the managed staging directory (when `-T` is in effect) or in the current directory. *Refer to the Buildme module below.*
 
 #### Command line arguments
 
@@ -85,6 +87,8 @@ The rest of the source is an ordinary Tcl script which can to anything including
 #### Test suite lookup recursion
 
 Prior executing custom code following the `testme` package loading command, the Testme searches for nested test suite sources to execute. The nested sources should have the same name as the current source file being executed and reside in its immediate subdirectories thus rigging for the recursive test suite processing. The recursion depth is unlimited by default and user parts of the test suites are processed in the depth first order. For example, prior the toplevel source `test/testme.tcl` the Testme would also execute `test/nested/testme.tcl` if it exists.
+
+The nested suite processing is governed by a handshake protocol between the driving Testme machinery (the generation which loaded at the toplevel) and the nested test suites. The driver pre-registers itself in every nested suite interpreter, so that the nested suite's `package require testme` command is satisfied by the driver itself without loading any local or vendored copy of the Testme module the nested suite might carry. This guarantees that exactly one Testme generation per run drives the entire suite tree, keeping the runs unaffected by stale per-package module copies. In its turn, every nested suite interpreter receives the protocol record consisting of the `::argv0` (the suite source path), `::nesting` (the nesting depth), `::ancestors` (the list of the processed suite sources, also serving as the symlink loop protection) variables and the `testme::unit` & `testme::nest` commands. The protocol record is defined by a single roster in the module source, so extending it with new fields takes adding them right there, with the propagation and the legacy level tolerance taken care of automatically. Module copies predating the protocol are tolerated: they are never loaded when a driver is present, while a legacy driver merely degrades the affected nesting levels to its own behaviour without aborting the run.
 
 For each test suite source the current directory is set to the directory containing this source. This way, the user part of the suite always has suite-specific files in the `.` directory, regardless of recursion level. This also means that the suite can always determine the location of the Testme module and set the module location path accordingly in the way shown above.
 
@@ -110,7 +114,7 @@ So far there are two special options, `-name` and `-tags` which are default-init
 
 The `-name` option represents the human-readable unit description. The `-tags` option represents a list of tags which are used to determine whether a particular unit is to be processed or skipped.
 
-The mandatory code block specifies Tcl code executed with Tcl's [apply](https://wiki.tcl-lang.org/page/apply) command during unit execution phase. As the unit is executed in a pristine environment, its code block might contain proper Tcl script preamble, including loading required packages.
+The mandatory code block specifies Tcl code executed with Tcl's [apply](https://wiki.tcl-lang.org/page/apply) command during unit execution phase. As the unit is executed in a pristine environment, its code block might contain proper Tcl script preamble, including loading required packages. The `exit` command is redefined within the unit code to report the process termination attempts, along with the arguments they were made with, as unit failures.
 
 There are three outcomes of the unit's code block execution:
 

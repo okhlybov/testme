@@ -47,7 +47,7 @@ namespace eval ::buildme {
     } finally {
       if {[dict get $unit -cleanup]} {
         if {[catch {file delete -force -- $dir}]} {
-          puts stderr "failed to delete temporary directory $dir
+          puts stderr "failed to delete temporary directory $dir"
         }
       }
     }
