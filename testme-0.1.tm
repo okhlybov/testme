@@ -15,12 +15,7 @@ namespace eval ::testme {
   regexp -- {-(\d+(?:\.\d+)*)$} [file rootname [file tail [info script]]] ~ version
 
 
-  # The inter-level protocol record: field names with their defaults.
-  # The core fields ::argv0 & ::nesting are computed per level explicitly;
-  # every other field is propagated to the nested interpreters as-is, or
-  # seeded with its default when absent, ex. under a legacy driver which
-  # knows nothing about it. Extending the protocol takes adding a field
-  # right here and nothing else
+  # The inter-level protocol record; see HACKING.md. Extending it takes adding a field right here
   variable fields {
     ancestors {}
     bailout false
@@ -30,13 +25,14 @@ namespace eval ::testme {
   namespace export unit
 
 
-  proc Import {source} {
+  proc Import {source {path {}}} {
     variable executor
     variable version
     variable seq
     variable fields
     set norm [file normalize $source]
-    if {[lsearch -exact $::ancestors $norm] < 0} {lappend ::ancestors $norm}
+    if {$path eq {}} {set path [concat $::ancestors [list $norm]]}
+    set ::ancestors $path
     set box box[incr seq]
     interp create $box
     try {
@@ -53,15 +49,16 @@ namespace eval ::testme {
       interp alias $box ::testme::nest {} ::testme::Nest
       $box eval {namespace eval ::testme {namespace export unit}}
       $box eval set ::argv0 $norm
-      $box eval set ::nesting [incr $::nesting -1]
+      $box eval [list set ::ancestors $path]
       foreach {name default} $fields {
+        if {$name eq {ancestors}} {continue}
         if {[info exists ::$name]} {
           $box eval [list set ::$name [set ::$name]]
         } else {
           $box eval [list set ::$name $default]
         }
       }
-      $box eval [list package ifneeded testme $version "[list ::testme::nest [file dirname $norm]]; [list package provide testme $version]"]
+      $box eval [list package ifneeded testme $version "[list ::testme::nest [file dirname $norm] $path]; [list package provide testme $version]"]
       $box eval {
         cd [file dirname $::argv0]
         source [file tail $::argv0]
@@ -72,19 +69,16 @@ namespace eval ::testme {
   }
 
 
-  # Nested suite lookup & processing. Always executed by the driving
-  # interpreter of the enclosing level, be it the toplevel machinery or
-  # a self-loaded module copy within a legacy nesting level
-  proc Nest {dir} {
+  # Nested suite lookup & processing; runs on the driving interpreter of the enclosing level
+  proc Nest {dir {path {}}} {
     set wd [pwd]
     foreach source [glob -nocomplain -directory $dir [file join * [file tail $::argv0]]] {
-      set source [file normalize $source]
-      if {[lsearch -exact $::ancestors $source] >= 0} {continue}
+      set norm [file normalize $source]
+      if {[lsearch -exact $path $norm] >= 0} {continue}
       try {
-        Import $source
+        Import $source [linsert $path end $norm]
       } on error {e o} {
-        # The fail fast policy: re-raise when bailing out is requested,
-        # otherwise contain the failure and let the run continue
+        # Contain the failure unless bailing out is requested
         if {[info exists ::bailout] && $::bailout} {
           return -code error -errorinfo [dict get $o -errorinfo] $e
         }
@@ -101,6 +95,9 @@ namespace eval ::testme {
   ### Toplevel code
 
 
+  # The layer discriminator: the driver itself never plants ::nesting, the
+  # children carry their nesting depth (the legacy drivers planted negative
+  # import ordinals instead)
   try {set ::nesting} on error {} {
 
 
@@ -212,9 +209,6 @@ namespace eval ::testme {
       if {$quiet} {set tapme [expr {![catch {package require tapme}]}]}
 
 
-      set ::nesting -1
-
-
       set paths "eval tcl::tm::path add [tcl::tm::path list]"
 
 
@@ -285,6 +279,17 @@ namespace eval ::testme {
             }
             interp alias unit puts {} puts
             interp alias unit skip {} skip
+            # The unit layer facade: the auxiliary helpers without the driving machinery
+            unit eval [list package ifneeded testme $::testme_version [list package provide testme $::testme_version]]
+            unit eval {
+              namespace eval ::testme {namespace export with}
+              proc ::testme::with {var list code} {
+                upvar 1 $var v
+                if {[catch {set v}]} {set v [list]}
+                set list [concat $v $list]
+                apply [list $var $code] $list
+              }
+            }
             unit eval tcl::tm::path add {*}[tcl::tm::path list]
             catch {unit eval "apply {{unit} {[dict get $unit -code]}} {$unit}"} return opts
             return [dict merge $opts [dict create -return $return -stdout $stdout -stderr $stderr -id [dict get $unit -id]]]
@@ -297,7 +302,7 @@ namespace eval ::testme {
       }
 
 
-      variable executor [tpool::create -maxworkers $jobs -initcmd "$paths; $static;"]
+      variable executor [tpool::create -maxworkers $jobs -initcmd "$paths; [list set ::testme_version $version]; $static;"]
 
 
       variable pending [list]
@@ -366,8 +371,7 @@ namespace eval ::testme {
       }
 
 
-      # Emits a TAP line: prints it unless the output is suppressed, in
-      # which case the tapme consumer is fed instead
+      # Emits a TAP line: prints it, or feeds the suppressed output to the tapme consumer
       proc Emit {text} {
         variable quiet
         variable tapme
@@ -379,8 +383,7 @@ namespace eval ::testme {
       }
 
 
-      # Registers a failed nested suite as a synthetic failed unit, keeping
-      # the TAP plan consistent
+      # Registers a failed nested suite as a synthetic failed unit, keeping the TAP plan consistent
       proc FailSuite {source info} {
         variable units
         variable id
@@ -507,7 +510,7 @@ namespace eval ::testme {
       try {
 
 
-        Import $::argv0
+        Import $::argv0 [list [file normalize $::argv0]]
 
 
         if {!$quiet || $tapme} {
@@ -570,15 +573,13 @@ namespace eval ::testme {
   ### Nested code
 
 
-  if {$::nesting != 0} {
-    # Legacy path: reached only when this module copy is loaded by an
-    # older-generation driver which doesn't pre-register itself in this
-    # interpreter. Seed the protocol fields it knows nothing about with
-    # their roster defaults
+  if {[info exists ::nesting]} {
+    # Legacy path: this copy was loaded by a pre-protocol driver; seed the missing fields and recurse box-locally
     variable fields
     foreach {name default} $fields {
       if {![info exists ::$name]} {set ::$name $default}
     }
+    lappend ::ancestors [file normalize $::argv0]
     set wd [pwd]
     foreach source [glob -nocomplain [file join * [file tail $::argv0]]] {
       set source [file normalize $source]
