@@ -36,14 +36,10 @@ Consequences: exactly one machinery generation exists per run; stale vendored co
 
 The record every child receives is declared as data — the `fields` roster in `testme-0.1.tm`:
 
-- `::argv0` (the child's suite source path) and `::ancestors` (the suite's ancestry — the suite source itself included, so the nesting depth is `[llength $::ancestors] - 1` wherever needed; doubling as the symlink-loop guard) are computed per level in `Import`. The legacy drivers planted `::nesting` (negative import ordinals) instead, which the layer discriminator still honours.
-- Every other roster field (`ancestors` — the processed-suites ancestry, doubling as the symlink-loop guard; `bailout` — the fail-fast policy) is propagated as-is or seeded with its roster default when absent.
+- `::argv0` (the child's suite source path) and `::ancestors` (the suite's ancestry — the suite source itself included, so the nesting depth is `[llength $::ancestors] - 1` wherever needed; doubling as the symlink-loop guard and serving as the layer discriminator) are computed per level in `Import`.
+- Every other roster field (`bailout` — the fail-fast policy) is propagated as-is or seeded with its roster default when absent.
 
-Adding a field takes one roster line: the propagation loop in `Import` and the adoption loops (toplevel initialization, legacy path) are generic.
-
-### Legacy tolerance
-
-Module copies predating the protocol never load under a driver — the stub preempts the require. Under a *legacy* driver (no stubs, no record), a new-generation copy loaded box-side runs the bottom nested-code section: it seeds the missing roster fields, performs the box-local recursion with cycle protection, and re-establishes the full protocol (stubs, facades) for every deeper level. Legacy levels degrade to legacy behaviour without aborting the run.
+Adding a field takes one roster line: the propagation loop in `Import` and the adoption loop in the toplevel initialization are generic.
 
 ## The run flow
 

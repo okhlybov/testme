@@ -82,11 +82,7 @@ namespace eval ::testme {
         if {[info exists ::bailout] && $::bailout} {
           return -code error -errorinfo [dict get $o -errorinfo] $e
         }
-        if {[llength [info commands ::testme::FailSuite]]} {
-          FailSuite $source $e
-        } else {
-          catch {puts stderr "failed to process suite $source: $e"}
-        }
+        FailSuite $source $e
       } finally {cd $wd}
     }
   }
@@ -95,10 +91,10 @@ namespace eval ::testme {
   ### Toplevel code
 
 
-  # The layer discriminator: the driver itself never plants ::nesting, the
-  # children carry their nesting depth (the legacy drivers planted negative
-  # import ordinals instead)
-  try {set ::nesting} on error {} {
+  # The layer discriminator: the driver plants the protocol record
+  # (::ancestors) in every child it imports; a bare load finds no record
+  # and runs the driver instead
+  try {set ::ancestors} on error {} {
 
 
     if {![info exists ::argv0] || ![file isfile [file normalize $::argv0]]} {
@@ -567,25 +563,6 @@ namespace eval ::testme {
     }
 
 
-  }
-
-
-  ### Nested code
-
-
-  if {[info exists ::nesting]} {
-    # Legacy path: this copy was loaded by a pre-protocol driver; seed the missing fields and recurse box-locally
-    variable fields
-    foreach {name default} $fields {
-      if {![info exists ::$name]} {set ::$name $default}
-    }
-    lappend ::ancestors [file normalize $::argv0]
-    set wd [pwd]
-    foreach source [glob -nocomplain [file join * [file tail $::argv0]]] {
-      set source [file normalize $source]
-      if {[lsearch -exact $::ancestors $source] >= 0} {continue}
-      try {Import $source} finally {cd $wd}
-    }
   }
 
 
