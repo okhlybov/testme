@@ -118,6 +118,8 @@ testme::unit -name "unit name" -tags {tagA tagB} -input {OK} {
 
 So far there are two special options, `-name` and `-tags` which are default-initialized to `unit#`  and `{}` if not specified, respectively. The rest of options is passed through of the unit code block.
 
+Within the unit code, the `context` command retrieves the passed options: flat as `[context -xyz]` or nested as `[context -abc -def]`, with missing keys failing the unit. The `unit` dict variable remains available as well.
+
 The `-name` option represents the human-readable unit description. The `-tags` option represents a list of tags which are used to determine whether a particular unit is to be processed or skipped.
 
 The mandatory code block specifies Tcl code executed with Tcl's [apply](https://wiki.tcl-lang.org/page/apply) command during unit execution phase. As the unit is executed in a pristine environment, its code block might contain proper Tcl script preamble, including loading required packages. The `exit` command is redefined within the unit code to report the process termination attempts, along with the arguments they were made with, as unit failures. The `testme` package itself may also be required from within the unit code; the package presents a different face to every layer it is loaded from, so the unit layer receives only the auxiliary helpers, such as `testme::with`, without the driving machinery.

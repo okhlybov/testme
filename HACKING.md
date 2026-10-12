@@ -19,7 +19,7 @@ Audience: testme hackers and maintainers. The user-facing documentation lives in
 |---|---|---|
 | driver | the toplevel suite (no pre-registration) | the full machinery: command line parsing, thread pool, nested suite discovery, TAP emission, run loop |
 | suite box | child interpreter created by the driver's `Import` | the `unit` & `nest` commands, aliased into the driver |
-| unit code | worker interpreter created by the thread pool | the auxiliary helpers, ex. `testme::with` — no driving machinery |
+| unit code | worker interpreter created by the thread pool | the auxiliary helpers (`testme::with`) and the `context` accessor over the unit record — no driving machinery |
 | bare require | none of the above (an interactive `tclsh` etc.) | a catchable error — there is no layer context to join |
 
 ## The load protocol
@@ -27,7 +27,7 @@ Audience: testme hackers and maintainers. The user-facing documentation lives in
 The driver **pre-registers itself in every child it creates** via `package ifneeded` stubs:
 
 - `Import` plants a stub in every suite box — the face is the `unit` & `nest` commands (aliases into the driver) plus the namespace export — and threads the protocol record into the child as global variables.
-- `process` plants a stub in every unit interpreter — the face is `package provide` plus the `testme::with` helper, defined on the spot. The driver version reaches the workers through the pool's init script (`::testme_version`).
+- `process` plants a stub in every unit interpreter — the face is `package provide` plus the `testme::with` helper, defined on the spot — and aliases the `context` accessor over the unit record. The driver version reaches the workers through the pool's init script.
 - Bare requires (no suite context) find no stub: the real module loads, the `::argv0` guard raises a catchable error.
 
 Consequences: exactly one machinery generation exists per run; stale vendored copies are never sourced; shaping a facade means editing a stub, not the module search order.

@@ -230,7 +230,14 @@ namespace eval ::testme {
         rename puts ::tcl::puts
 
 
-        proc puts {args} {
+        # The unit context accessor: nested retrieval of the unit record
+        proc Context {args} {
+          if {![llength $args]} {return $::testme::Context}
+          tailcall dict get $::testme::Context {*}$args
+        }
+
+
+        proc Puts {args} {
           variable stdout
           variable stderr
           set xargs $args
@@ -256,12 +263,13 @@ namespace eval ::testme {
         }
 
 
-        proc skip {{reason {}}} {return -code 1073741823 -level 0 $reason}
+        proc Skip {{reason {}}} {return -code 1073741823 -level 0 $reason}
 
 
         proc process {unit} {
           variable stdout [list]
           variable stderr [list]
+          set ::testme::Context $unit
           interp create unit
           try {
             unit eval {
@@ -273,8 +281,9 @@ namespace eval ::testme {
                 return -code error {the unit code requested to terminate the process: exit}
               }
             }
-            interp alias unit puts {} puts
-            interp alias unit skip {} skip
+            interp alias unit puts {} Puts
+            interp alias unit skip {} Skip
+            interp alias unit context {} Context
             # The unit layer facade: the auxiliary helpers without the driving machinery
             unit eval [list package ifneeded testme $::testme::version [list package provide testme $::testme::version]]
             unit eval {
