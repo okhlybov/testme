@@ -52,7 +52,7 @@ Adding a field takes one roster line: the propagation loop in `Import` and the a
 ## Containment
 
 - `exit` in test code is a redefined throwing proc — units and suite boxes alike — so process termination attempts are reported as failures with their arguments.
-- Suite processing errors become synthetic failed units; `-e` turns the first anomaly of any kind into a bail out.
+- Suite processing errors become synthetic failed units; `-e` turns the first anomaly of any kind into a bail out: the queued pool jobs are cancelled (`tpool::cancel`), the in-flight units are drained silently and the process terminates only once the workers are idle, which keeps the termination deterministic (no thread finalization races, no abandoned queued work).
 - Framework-level death prints the reason on stderr unconditionally (the trace stays behind `-v`), then `Bail out!` and exit 1.
 - No time limits by design — wrap unattended runs in an external `timeout`.
 

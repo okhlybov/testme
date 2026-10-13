@@ -544,7 +544,6 @@ namespace eval ::testme {
             }
           }
         }
-        if {$premature && $outcome eq {failed}} {error "bailing out on failure"}
       }
 
 
@@ -598,13 +597,42 @@ namespace eval ::testme {
         }
 
 
+        # The fail fast policy: on the first reported failure the queued
+        # units are cancelled and the in-flight ones are drained silently,
+        # so the workers are idle when the process terminates
+        set bailout no
         while {[llength $pending]} {
           foreach f [tpool::wait $executor $pending pending] {
             set pending [lsearch -inline -all -not -exact $pending $f]
+            if {$bailout} {
+              catch {tpool::get $executor $f}
+              continue
+            }
             Report [tpool::get $executor $f]
+            if {$premature && $failures > 0} {
+              set bailout yes
+              set premature false
+              # The cancelled jobs are gone from the pool - drop their handles
+              # so the silent drain does not wait on them
+              foreach cancelled [tpool::cancel $executor $pending] {
+                set pending [lsearch -inline -all -not -exact $pending $cancelled]
+              }
+              break
+            }
+          }
+          if {$bailout} {break}
+        }
+        if {$bailout} {
+          while {[llength $pending]} {
+            foreach f [tpool::wait $executor $pending pending] {
+              set pending [lsearch -inline -all -not -exact $pending $f]
+              catch {tpool::get $executor $f}
+            }
           }
         }
         foreach s $synthetic {Report $s}
+        if {$premature && $failures > 0} {set bailout yes}
+        if {$bailout} {Emit "Bail out!"}
         if {$quiet} {
           if {$tapme} {
             foreach l [::tapme::summary] {puts stderr $l}
@@ -619,6 +647,9 @@ namespace eval ::testme {
       } finally {
 
 
+        # Releases the pool so the worker threads are joined before the
+        # process termination - keeps the finalization deterministic
+        catch {tpool::release $executor}
         if {$cleanup && $staging ne {false}} {
           if {[catch {file delete -force -- $staging}]} {
             if {$verbose} {puts stderr "failed to remove temporary directory $staging"}
