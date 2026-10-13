@@ -156,6 +156,25 @@ unit-test "jobs: DetectCores detects available cores and respects TESTME_JOBS" {
         if {![string is integer -strict $detected] || $detected < 1} {
             error "invalid detected: $detected"
         }
+        if {[file readable /sys/devices/system/cpu/online]} {
+            set f [open /sys/devices/system/cpu/online r]
+            set online 0
+            foreach r [split [string trim [read $f]] ,] {
+                if {[regexp {^(\d+)-(\d+)$} $r ~ s e]} {
+                    incr online [expr {$e - $s + 1}]
+                } else {
+                    incr online
+                }
+            }
+            close $f
+            if {$detected < 1 || $detected > $online} {
+                error "detected $detected outside the online count $online"
+            }
+            set constrained [expr {[file readable /sys/fs/cgroup/cpu.max] || [file readable /sys/fs/cgroup/cpu/cpu.cfs_quota_us]}]
+            if {!$constrained && $detected != $online} {
+                error "detected $detected != online $online without cgroup constraints"
+            }
+        }
         set ::env(TESTME_JOBS) 7
         if {[::testme::DetectCores] != 7} {
             error "TESTME_JOBS not honored: [::testme::DetectCores]"

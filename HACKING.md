@@ -13,12 +13,12 @@ Audience: testme hackers and maintainers. The user-facing documentation lives in
 
 ## The layer model
 
-`testme` presents a different face to every layer it is loaded from, and once a driver is present no layer ever loads a module copy:
+`testme` presents a different face to every layer it is loaded from, and once a driver is present no layer ever loads a module copy. The faces are the per-level sections of the original single-file design - the same source answering `package require testme` differently at each level of the suite tree - with one deliberate change of authority: the sections are no longer activated by the load context of the loading copy, they are granted by the driver, which keeps the answer authoritative regardless of generation or vendored copies:
 
 | layer | context | face provided |
 |---|---|---|
 | driver | the toplevel suite (no pre-registration) | the full machinery: command line parsing, thread pool, nested suite discovery, TAP emission, run loop |
-| suite box | child interpreter created by the driver's `Import` | the `unit` & `nest` commands, aliased into the driver |
+| suite box | child interpreter created by the driver's `Import` | the `unit` & `nest` commands aliased into the driver, plus the `with` accumulator (defined box-side, so its `upvar` targets the suite frame) |
 | unit code | worker interpreter created by the thread pool | the auxiliary helpers (`testme::with`) and the `context` accessor over the unit record — no driving machinery |
 | bare require | none of the above (an interactive `tclsh` etc.) | a catchable error — there is no layer context to join |
 
@@ -26,7 +26,7 @@ Audience: testme hackers and maintainers. The user-facing documentation lives in
 
 The driver **pre-registers itself in every child it creates** via `package ifneeded` stubs:
 
-- `Import` plants a stub in every suite box — the face is the `unit` & `nest` commands (aliases into the driver) plus the namespace export — and threads the protocol record into the child as global variables.
+- `Import` plants a stub in every suite box — the face is the `unit` & `nest` commands (aliases into the driver), the `with` accumulator, `DetectCores` (the one Capitalized name committed to the suite-reliable surface — the self-test's jobs unit and parallelism-aware suites size work against it) and the namespace export — and threads the protocol record into the child as global variables.
 - `process` plants a stub in every unit interpreter — the face is `package provide` plus the `testme::with` helper, defined on the spot — and aliases the `context` accessor over the unit record. The driver version reaches the workers through the pool's init script.
 - Bare requires (no suite context) find no stub: the real module loads, the `::argv0` guard raises a catchable error.
 
@@ -65,4 +65,3 @@ Adding a field takes one roster line: the propagation loop in `Import` and the a
 ## Known residuals
 
 - `buildme` sandbox names carry a random tail; identical draws across concurrent units of one suite share a staging directory (`file mkdir` has no exclusivity). Fix direction: name by the driver-unique unit id.
-- `testme::with` is a unit-layer helper only — it is not part of the box facade.

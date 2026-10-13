@@ -70,7 +70,8 @@ namespace eval ::testme {
       interp alias $box ::testme::unit {} ::testme::unit
       interp alias $box ::testme::nest {} ::testme::Nest
       interp alias $box ::testme::DetectCores {} ::testme::DetectCores
-      $box eval {namespace eval ::testme {namespace export unit DetectCores}}
+      $box eval {namespace eval ::testme {namespace export unit DetectCores with}}
+      $box eval [list proc ::testme::with {var list code} $::testme::With]
       $box eval set ::argv0 $norm
       $box eval [list set ::ancestors $path]
       foreach {name default} $fields {
@@ -89,6 +90,17 @@ namespace eval ::testme {
     } finally {
       interp delete $box
     }
+  }
+
+
+  # The with accumulator's body - the same code serves every layer the
+  # package is loaded on: the driver, the suite boxes (definition time)
+  # and the unit interpreters (run time)
+  variable With {
+    upvar 1 $var v
+    if {[catch {set v}]} {set v [list]}
+    set list [concat $v $list]
+    apply [list $var $code] $list
   }
 
 
@@ -111,31 +123,124 @@ namespace eval ::testme {
   }
 
 
+  # Counts the CPUs in a kernel-style cpu list, ex. "0-3,8,10-11"
+  proc CountCPUs {list} {
+    set count 0
+    foreach range [split $list ,] {
+      if {[regexp {^(\d+)-(\d+)$} $range ~ start end]} {
+        incr count [expr {$end - $start + 1}]
+      } elseif {[string is integer -strict $range]} {
+        incr count
+      }
+    }
+    return $count
+  }
+
+
+  # The effective CPU limit of the current cgroup (the quota rounded up or
+  # the cpuset size, whichever is tighter), or an empty string when the
+  # process is unconstrained. Handles cgroup v2 and v1, resolving the
+  # process cgroup path through /proc/self/cgroup
+  proc CgroupLimit {} {
+    set dirs [list /sys/fs/cgroup]
+    if {![catch {set f [open /proc/self/cgroup r]}]} {
+      try {
+        set data [read $f]
+      } finally {
+        close $f
+      }
+      foreach line [split $data \n] {
+        # v2: "0::/path"; v1: "12:cpu,cpuacct:/path"
+        if {![regexp {^\d+:[^:]*:(.+)$} $line ~ path]} {continue}
+        if {$path eq {/}} {
+          lappend dirs /sys/fs/cgroup
+        } else {
+          lappend dirs [file join /sys/fs/cgroup $path]
+          lappend dirs [file join /sys/fs/cgroup cpu,cpuacct $path]
+        }
+      }
+    }
+    set limits [list]
+    foreach dir $dirs {
+      # v2 quota: "QUOTA PERIOD" or "max PERIOD"
+      set f [file join $dir cpu.max]
+      if {[file readable $f] && ![catch {
+        set f [open $f r]
+        try {
+          lassign [split [string trim [read $f]] quota period]
+        } finally {
+          close $f
+        }
+      }] && [string is integer -strict $quota] && [string is integer -strict $period] && $quota > 0 && $period > 0} {
+        lappend limits [int [::tcl::mathfunc::ceil [expr {double($quota) / $period}]]]
+      }
+      # v1 quota: -1 means unlimited
+      set q [file join $dir cpu.cfs_quota_us]
+      set p [file join $dir cpu.cfs_period_us]
+      if {[file readable $q] && [file readable $p] && ![catch {
+        set f [open $q r]
+        try {
+          set quota [string trim [read $f]]
+        } finally {
+          close $f
+        }
+        set f [open $p r]
+        try {
+          set period [string trim [read $f]]
+        } finally {
+          close $f
+        }
+      }] && [string is integer -strict $quota] && $quota > 0 && [string is integer -strict $period] && $period > 0} {
+        lappend limits [int [::tcl::mathfunc::ceil [expr {double($quota) / $period}]]]
+      }
+      # cpusets
+      foreach name {{cpuset.cpus.effective} {cpuset/cpuset.effective_cpus}} {
+        set f [file join $dir {*}$name]
+        if {[file readable $f] && ![catch {
+          set f [open $f r]
+          try {
+            set data [string trim [read $f]]
+          } finally {
+            close $f
+          }
+          set count [CountCPUs $data]
+        }] && $count > 0} {
+          lappend limits $count
+        }
+      }
+    }
+    if {[llength $limits]} {return [::tcl::mathfunc::min {*}$limits]}
+    return {}
+  }
+
+
+  # Caps a detected processor count by the cgroup limit
+  proc CgroupCap {count} {
+    set limit [CgroupLimit]
+    if {$limit ne {} && $limit > 0 && $limit < $count} {return $limit}
+    return $count
+  }
+
+
+  # The effective parallelism: the TESTME_JOBS override, then the platform
+  # sources (the cgroup limit caps them all), then the safe fallback
   proc DetectCores {} {
     if {[info exists ::env(TESTME_JOBS)] && [string is integer -strict $::env(TESTME_JOBS)] && $::env(TESTME_JOBS) > 0} {
       return $::env(TESTME_JOBS)
     }
-    if {[info exists ::env(NUMBER_OF_PROCESSORS)] && [string is integer -strict $::env(NUMBER_OF_PROCESSORS)] && $::env(NUMBER_OF_PROCESSORS) > 0} {
-      return $::env(NUMBER_OF_PROCESSORS)
-    }
+    set count {}
+    # Linux: the kernel cpu list, then the cpuinfo tally
     if {[file readable /sys/devices/system/cpu/online]} {
       if {![catch {
         set f [open /sys/devices/system/cpu/online r]
         try {
-          set line [string trim [read $f]]
+          set count [CountCPUs [string trim [read $f]]]
         } finally {
           close $f
         }
-        set count 0
-        foreach range [split $line ,] {
-          if {[regexp {^(\d+)-(\d+)$} $range ~ start end]} {
-            incr count [expr {$end - $start + 1}]
-          } elseif {[string is integer -strict $range]} {
-            incr count
-          }
-        }
-        if {$count > 0} {return $count}
-      }]} {}
+      }] && $count > 0} {
+        return [CgroupCap $count]
+      }
     }
     if {[file readable /proc/cpuinfo]} {
       if {![catch {
@@ -146,17 +251,24 @@ namespace eval ::testme {
           close $f
         }
         set count [llength [regexp -all -line -inline {^processor\s*:} $data]]
-        if {$count > 0} {return $count}
-      }]} {}
+      }] && $count > 0} {
+        return [CgroupCap $count]
+      }
     }
-    foreach sysctl_cmd {{sysctl -n hw.logicalcpu} {sysctl -n hw.ncpu}} {
-      if {![catch {exec {*}$sysctl_cmd} n] && [string is integer -strict $n] && $n > 0} {
+    # Windows: the canonical environment variable
+    if {[info exists ::env(NUMBER_OF_PROCESSORS)] && [string is integer -strict $::env(NUMBER_OF_PROCESSORS)] && $::env(NUMBER_OF_PROCESSORS) > 0} {
+      return $::env(NUMBER_OF_PROCESSORS)
+    }
+    # macOS & the BSDs
+    foreach cmd {{sysctl -n hw.logicalcpu} {sysctl -n hw.ncpu}} {
+      if {![catch {exec {*}$cmd} n] && [string is integer -strict $n] && $n > 0} {
         return $n
       }
     }
+    # Linux without sysfs, Solaris & AIX
     foreach cmd {{nproc} {getconf _NPROCESSORS_ONLN}} {
       if {![catch {exec {*}$cmd} n] && [string is integer -strict $n] && $n > 0} {
-        return $n
+        return [CgroupCap $n]
       }
     }
     return 4
@@ -356,15 +468,8 @@ namespace eval ::testme {
             interp alias unit context {} Context
             # The unit layer facade: the auxiliary helpers without the driving machinery
             unit eval [list package ifneeded testme $::testme::version [list package provide testme $::testme::version]]
-            unit eval {
-              namespace eval ::testme {namespace export with}
-              proc ::testme::with {var list code} {
-                upvar 1 $var v
-                if {[catch {set v}]} {set v [list]}
-                set list [concat $v $list]
-                apply [list $var $code] $list
-              }
-            }
+            unit eval {namespace eval ::testme {namespace export with}}
+            unit eval [list proc ::testme::with {var list code} $::testme::With]
             unit eval tcl::tm::path add {*}[tcl::tm::path list]
             catch {unit eval "apply {{unit} {[dict get $unit -code]}} {$unit}"} return opts
             return [dict merge $opts [dict create -return $return -stdout $stdout -stderr $stderr -id [dict get $unit -id]]]
@@ -377,7 +482,7 @@ namespace eval ::testme {
       }
 
 
-      variable executor [tpool::create -maxworkers $jobs -initcmd "$paths; [list namespace eval ::testme [list set version $version]]; $static;"]
+      variable executor [tpool::create -maxworkers $jobs -initcmd "$paths; [list namespace eval ::testme [list set version $version]]; [list namespace eval ::testme [list set With $::testme::With]]; $static;"]
 
 
       variable pending [list]
@@ -673,17 +778,6 @@ namespace eval ::testme {
     }
 
 
-  }
-
-
-  ### Custom code which slurped the testme package's code
-  
-  
-  proc with {var list code} {
-    upvar 1 $var v
-    if {[catch {set v}]} {set v [list]}
-    set list [concat $v $list]
-    apply [list $var $code] $list
   }
 
 
