@@ -550,6 +550,9 @@ namespace eval ::tapme {
 # CLI mode: consume a TAP stream from the standard input channel
 if {[info script] ne {} && [info exists ::argv0] && $::argv0 ne {} && [file normalize [info script]] eq [file normalize $::argv0]} {
 
+  catch {fconfigure stdout -buffering none}
+  catch {fconfigure stdin -buffering line}
+
   set streaming false
   if {[catch {
     set ::tapme_opts {

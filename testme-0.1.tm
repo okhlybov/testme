@@ -63,6 +63,9 @@ if {$context eq {toplevel}} {
     exit 1
   }
 
+  catch {fconfigure stdout -buffering line}
+  catch {fconfigure stderr -buffering line}
+
   # The module version is carried by the file name
   set version 0
   regexp -- {-(\d+(?:\.\d+)*)$} [file rootname [file tail [info script]]] -> version
@@ -864,7 +867,10 @@ if {$context eq {toplevel}} {
   # through the exit code only
   proc Say {text} {
     variable quiet
-    if {!$quiet} { puts $text }
+    if {!$quiet} {
+      puts $text
+      catch {flush stdout}
+    }
   }
 
   # Sanitize single-line TAP fields so embedded newlines cannot corrupt the stream
