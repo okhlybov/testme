@@ -12,12 +12,20 @@ set root [file normalize $here/..]
 set helpers [file join $here selftest.tcl]
 set sample [file join $root sample sample.tcl]
 
-# A bare require from a clean interpreter finds no suite script to rerun
+# A bare require from a stub-less interpreter finds no suite script to rerun
 unit -name bare-require [list apply {{root helpers} {
   source $helpers
+  lassign [capture sh -c "echo 'tcl::tm::add $root; package require testme' | tclsh"] code out
+  expect refused [expr {$code == 1 && [string match {*invalid ::argv0*} $out]}]
+}} $root $helpers]
+
+# The unit layer face: the require inside the unit code is answered
+# by the provide-only stub, the helpers are already planted
+unit -name unit-layer-face [list apply {{root helpers} {
+  source $helpers
   tcl::tm::add $root
-  set code [catch {package require testme} message]
-  expect refused [expr {$code == 1 && [string match {*invalid ::argv0*} $message]}]
+  expect provided [expr {[package require testme] eq {0.1}}]
+  expect helpers [expr {[llength [info commands ::testme::with]] == 1}]
 }} $root $helpers]
 
 # The --version answer leaves before any machinery starts

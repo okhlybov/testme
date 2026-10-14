@@ -10,7 +10,7 @@ unit -name unit-exit-contained [list apply {{helpers sample} {
   source $helpers
   lassign [capture tclsh $sample] code out
   expect attempt-failed [expr {[matching $out {^not ok \d+ - runaway$}] == 1}]
-  expect attempt-reported [expr {[string match {*attempted to exit*} $out]}]
+  expect attempt-reported [expr {[string match {*requested to terminate the process*} $out]}]
 }} $helpers $sample]
 
 # A suite script failing outright becomes a synthetic roster entry
@@ -44,7 +44,7 @@ exit 0
 "]
   withfixture $pairs {
     lassign [capture tclsh $dir/test.tcl] code out
-    expect attempt-reported [expr {[string match {*suite attempted to exit*} $out]}]
+    expect attempt-reported [expr {[string match {*the suite code requested to terminate the process*} $out]}]
     expect unit-survived [expr {[matching $out {^ok \d+ - survivor$}] == 1}]
     expect failed-exit [expr {$code == 1}]
   }
