@@ -45,11 +45,12 @@ if {$context eq {toplevel}} {
   package require Thread
 
   # A bare require (an interactive shell, a sourced snippet) has no suite script to rerun;
-  # refuse it with a catchable error instead of mistaking the shell itself for a suite
+  # refuse it with an explicit diagnostic instead of mistaking the shell itself for a suite
   if {![info exists ::argv0] || $::argv0 eq {} ||
       [file normalize $::argv0] eq [file normalize [info nameofexecutable]] ||
       ![file isfile [file normalize $::argv0]]} {
-    error {testme package must be required by a script (invalid ::argv0)}
+    puts stderr "testme: must be required by a test suite script file being executed (invalid ::argv0)"
+    exit 1
   }
 
   # The module version is carried by the file name
@@ -78,12 +79,14 @@ if {$context eq {toplevel}} {
   # the units carrying the tag, -tag deselects them; -- ends the options
   # so the filters may look like ones
   variable jobs 0
+  variable source_name {}
   variable include [list]
   variable exclude [list]
   if {[catch {
     package require clip
     set opts {
       {{--jobs= -j=} -info "set maximum number of parallel units" -default 0 -slot jobs}
+      {{-S= --source=} -info "set suite script name to discover during descent" -default {} -slot source_name}
       {{--tap=} -info "emit the TAP version: 14 (streamed) or 13 (strictly ordered)" -default 14 -slot tap}
       {{-v --verbose} -info "dump unit output to standard error channel" -default true -slot verbose}
       {{-F --full-dump} -info "dump unit output for succeeded tests as well" -default true -slot full}
@@ -296,9 +299,10 @@ if {$context eq {toplevel}} {
   tpool::suspend $pool
 
   # Seed the context for rerunning this very script as a nested suite
+  set script [expr {$source_name ne {} ? $source_name : [file tail $::argv0]}]
   set Context [dict create \
-    -root [file dirname [file normalize $argv0]] \
-    -script [file tail $::argv0] \
+    -root [file dirname [file normalize $::argv0]] \
+    -script $script \
      tcl::tm::path [tcl::tm::path list] \
   ]
 
@@ -361,6 +365,8 @@ if {$context eq {toplevel}} {
       interp alias $u ::skip {} ::Skip
       # Unit code must not terminate the process; the attempt is reported as a failure
       interp eval $u {proc exit {args} {return -code error "the unit code requested to terminate the process: exit $args"}}
+      # Unit code must not change working directory (process-wide in multithreaded runner); use buildme instead
+      interp eval $u {proc cd {args} {return -code error "the unit code must not change working directory: use buildme instead"}}
       # The output capture: stdout and stderr are tallied, other channels pass through
       interp alias $u ::CapturePuts {} ::Puts
       interp eval $u {
@@ -453,7 +459,10 @@ if {$context eq {toplevel}} {
       -stage [pwd] \
       -cleanup $cleanup \
     ]]
-    set job [tpool::post -nowait $pool [list apply $worker $record [tcl::tm::path list] $version]]
+    set suitePaths {}
+    catch {set suitePaths [$box eval {tcl::tm::path list}]}
+    if {![llength $suitePaths]} { set suitePaths [tcl::tm::path list] }
+    set job [tpool::post -nowait $pool [list apply $worker $record $suitePaths $version]]
     dict set pending $job $index
     return $index
   }
@@ -474,14 +483,16 @@ if {$context eq {toplevel}} {
     set composed {}
     catch {set composed [$box eval {set ::testme::sourced}]}
     foreach path $composed { dict set ran [Identity $path] 1 }
-    Descend $root
+    set suitePaths {}
+    catch {set suitePaths [$box eval {tcl::tm::path list}]}
+    Descend $root $suitePaths
   }
 
   # Create an isolated suite interpreter over $root and run the script there;
   # the unit submissions arrive synchronously through the alias.
   # The current directory of the suite is its own directory (the boxes and the driver
   # share the thread's one), so the units inherit a meaningful staging directory
-  proc Box {root} {
+  proc Box {root {scriptName {}} {tmpaths {}}} {
     variable Context
     variable boxes
     variable nboxes
@@ -493,29 +504,35 @@ if {$context eq {toplevel}} {
     variable failed
     variable quiet
     variable verbose
+    if {$scriptName eq {}} {
+      set scriptName [dict get $Context -script]
+    }
+    if {![llength $tmpaths]} {
+      set tmpaths [dict get $Context tcl::tm::path]
+    }
     # The double execution guard: a script that has already run in this process
     # (composed by an umbrella, aliased by a symlink, discovered twice) is never rerun
-    set identity [Identity [file normalize [file join $root [dict get $Context -script]]]]
+    set identity [Identity [file normalize [file join $root $scriptName]]]
     if {[dict exists $ran $identity]} { return }
     dict set ran $identity 1
     set box [interp create suite[incr nboxes]]
     lappend boxes $box
-    set script [file join $root [dict get $Context -script]]
+    set script [file join $root $scriptName]
     dict set where $box [file normalize $script]
     set wd [pwd]
     try {
       if {[catch {
         # Seed the augmented context so the module takes its nested face when required
         $box eval {namespace eval ::testme {}}
-        $box eval [list set ::testme::Context [dict merge $Context [dict create -root $root]]]
+        $box eval [list set ::testme::Context [dict merge $Context [dict create -root $root tcl::tm::path $tmpaths]]]
         # Propagate the module lookup paths so `package require testme` resolves the same copy
-        $box eval {
+        $box eval [list apply {{paths} {
           set current [tcl::tm::path list]
-          foreach x [lreverse [dict get $::testme::Context tcl::tm::path]] {
+          foreach x [lreverse $paths] {
             # Squash duplicates in the module lookup path
             if {[lsearch $current $x] < 0} { tcl::tm::path add $x }
           }
-        }
+        }} $tmpaths]
         # The unit submissions cross the interpreter boundary through this alias
         interp alias $box ::testme::submit {} ::testme::Submit $box
         # Suite code must not terminate the process either
@@ -566,10 +583,10 @@ if {$context eq {toplevel}} {
   # in the immediate subdirectories of $root; called once a suite script has finished,
   # so the scripts it composed by sourcing are known before discovery reaches them;
   # deeper levels are reached through the completion of the immediate ones
-  proc Descend {root} {
+  proc Descend {root {tmpaths {}}} {
     variable Context
     foreach source [glob -nocomplain -directory $root [file join * [dict get $Context -script]]] {
-      Box [file dirname [file normalize $source]]
+      Box [file dirname [file normalize $source]] [dict get $Context -script] $tmpaths
     }
   }
 
@@ -701,6 +718,71 @@ if {$context eq {toplevel}} {
     }
   }
 
+  # Makes a directory tree writable (clears read-only flags on Windows, sets 0755/0644 on Unix)
+  proc MakeWritable {dir} {
+    catch {file attributes $dir -permissions 0755}
+    catch {file attributes $dir -readonly 0}
+    foreach item [glob -nocomplain -directory $dir * .*] {
+      set tail [file tail $item]
+      if {$tail eq "." || $tail eq ".."} continue
+      set ftype ""
+      catch {set ftype [file type $item]}
+      if {[file isdirectory $item] && $ftype ne "link"} {
+        MakeWritable $item
+      } else {
+        catch {file attributes $item -permissions 0644}
+        catch {file attributes $item -readonly 0}
+      }
+    }
+  }
+
+  # Spawns a background watchdog to periodically retry deleting locked directories (e.g. on Windows)
+  proc SpawnWatchdog {dir {timeout 60}} {
+    if {![file exists $dir]} return
+    set tempDir [file dirname [file normalize $dir]]
+    set script [file join $tempDir "watchdog-[pid]-[expr {int(rand()*999999)}].tcl"]
+    if {[catch {
+      set f [open $script w]
+      puts $f {
+        proc MakeWritable {dir} {
+          catch {file attributes $dir -permissions 0755}
+          catch {file attributes $dir -readonly 0}
+          foreach item [glob -nocomplain -directory $dir * .*] {
+            set tail [file tail $item]
+            if {$tail eq "." || $tail eq ".."} continue
+            set ftype ""
+            catch {set ftype [file type $item]}
+            if {[file isdirectory $item] && $ftype ne "link"} {
+              MakeWritable $item
+            } else {
+              catch {file attributes $item -permissions 0644}
+              catch {file attributes $item -readonly 0}
+            }
+          }
+        }
+        set target [lindex $argv 0]
+        set timeout 60
+        if {[llength $argv] > 1 && [string is integer -strict [lindex $argv 1]]} {
+          set timeout [lindex $argv 1]
+        }
+        set deadline [expr {[clock seconds] + $timeout}]
+        try {
+          while {[file exists $target] && [clock seconds] < $deadline} {
+            after 500
+            catch { MakeWritable $target }
+            catch { file delete -force -- $target }
+          }
+        } finally {
+          catch { file delete -force -- [info script] }
+        }
+      }
+      close $f
+      exec [info nameofexecutable] $script $dir $timeout &
+    } err]} {
+      catch {file delete -force -- $script}
+    }
+  }
+
   # The common tail: the suite interpreters go away, the workers wind down,
   # the managed staging directory is removed unless the garbage is retained
   proc Teardown {} {
@@ -712,8 +794,10 @@ if {$context eq {toplevel}} {
     foreach box $boxes { catch {interp delete $box} }
     tpool::release $pool
     if {$stage ne {false} && $cleanup} {
+      MakeWritable $stage
       if {[catch {file delete -force -- $stage}]} {
-        if {$verbose} {puts stderr "failed to remove temporary directory $stage"}
+        if {$verbose} {puts stderr "failed to remove temporary directory $stage, spawning watchdog"}
+        SpawnWatchdog $stage
       } elseif {$verbose} {
         puts stderr "removed temporary directory $stage"
       }
@@ -732,7 +816,7 @@ if {$context eq {toplevel}} {
   # Under the bailout policy a failing suite script aborts the discovery right away.
   # The queued units are cancelled and the suspended pool is resumed before the teardown,
   # for a pool holding queued jobs cannot be released
-  if {[catch {Box [dict get $Context -root]} err opts]} {
+  if {[catch {Box [dict get $Context -root] [file tail $::argv0]} err opts]} {
     if {!$quiet || $verbose} { puts stderr $err }
     foreach x [tpool::cancel $pool [dict keys $pending]] {
       dict unset pending $x

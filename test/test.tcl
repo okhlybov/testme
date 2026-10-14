@@ -15,7 +15,7 @@ set sample [file join $root sample sample.tcl]
 # A bare require from a stub-less interpreter finds no suite script to rerun
 unit -name bare-require [list apply {{root helpers} {
   source $helpers
-  lassign [capture sh -c "echo 'tcl::tm::add $root; package require testme' | tclsh"] code out
+  lassign [capture sh -c "echo 'tcl::tm::add $root; if {\[catch {package require testme} err\]} {puts stderr \$err; exit 1}' | tclsh"] code out
   expect refused [expr {$code == 1 && [string match {*invalid ::argv0*} $out]}]
 }} $root $helpers]
 

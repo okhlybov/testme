@@ -49,3 +49,19 @@ exit 0
     expect failed-exit [expr {$code == 1}]
   }
 }} $helpers $root]
+
+# A unit attempting to change working directory is contained and reported as a failure
+unit -name unit-cd-contained [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+unit -name try-cd {cd /tmp}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect attempt-reported [expr {[string match {*must not change working directory*} $out]}]
+    expect attempt-failed [expr {[matching $out {^not ok \d+ - try-cd$}] == 1}]
+    expect failed-exit [expr {$code == 1}]
+  }
+}} $helpers $root]
