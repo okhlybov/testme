@@ -6,6 +6,7 @@ Testme is an agentic-ready, high-performance testing framework for the [Tcl](htt
 
 - **Parallel Unit Execution**: High-throughput execution across multi-core systems using native OS thread pools (`Thread` package).
 - **TAP 14 & TAP 13 Compliance**: Streams real-time [TAP](https://testanything.org/) 14 results as tests complete, with strict ascending TAP 13 fallback.
+- **Hierarchical Subtests**: Emits standard indented TAP 14 subtests for discovered sub-suites and in-suite `subtest` blocks under `-n` / `--nested`.
 - **Unit Tagging & Filtering**: Granular test selection via command-line tag inclusions (`+tag` / `tag`) and exclusions (`-tag`).
 - **Lexical Scoping with `testme::with`**: Scoped tag and parameter accumulation across nested blocks at both suite and unit levels.
 - **Strict Execution Containment**: Units run in isolated interpreter threads with private `::env` environments; unsafe calls like `exit` and `cd` are intercepted and reported as failures without destabilizing the runner.
@@ -76,6 +77,8 @@ usage: tclsh suite.tcl [options] [--] [+tag ...] [-tag ...] [tag ...]
 | `-j=`, `--jobs=` | Maximum number of parallel worker threads. Defaults to detected system CPU cores. |
 | `-S=`, `--source=` | Suite script filename to discover during subdirectory descent (defaults to script name of `$::argv0`). |
 | `--tap=` | TAP protocol dialect: `14` (default, streamed out-of-order completion) or `13` (strictly ordered ascending indices). |
+| `-n`, `--nested` | Emits hierarchical TAP 14 indented subtests (for discovered sub-suites and in-suite subtests). Off by default; disabled in TAP 13 mode. |
+| `-s`, `--serial` | Runs units sequentially without a thread pool (disabling `tpool`). Degrades to serial mode automatically if the `Thread` package is not available. |
 | `-v`, `--verbose` | Dumps captured `stdout` and `stderr` for failed units to standard error. |
 | `-F`, `--full-dump` | Dumps captured output for succeeded units as well (useful for diagnostic inspection). |
 | `-K`, `--keep` | Retains temporary directories and dumps per-unit channel log files (`<id>-<name>-<channel>.out`). |
@@ -84,6 +87,23 @@ usage: tclsh suite.tcl [options] [--] [+tag ...] [-tag ...] [tag ...]
 | `-T`, `--staging` | Allocates and manages a temporary staging directory in `$TMPDIR` for the test run. |
 | `-h`, `--help` | Displays usage and options help. |
 | `--version` | Prints package version and exits. |
+
+### Environment Options (`TESTME_OPTS`)
+
+Default flags, options, and tag filters can be specified via the `TESTME_OPTS` environment variable. Its contents are parsed before the command line arguments, allowing command-line options to override any defaults set in the environment:
+
+```bash
+# Set serial execution and verbose output as defaults
+export TESTME_OPTS="-s -v"
+
+# Set parallel worker count and TAP 13 dialect
+export TESTME_OPTS="-j 4 --tap=13"
+
+# Include default tag filter
+export TESTME_OPTS="+smoke"
+```
+
+Command-line flags take precedence over settings provided in `TESTME_OPTS`. For instance, running `tclsh suite.tcl -j 2` when `TESTME_OPTS="-s"` will execute with 2 worker threads.
 
 ### Tag Filters
 
@@ -116,6 +136,23 @@ When a test suite runs:
 4. **Umbrella Guard**: Any file sourced by a suite during discovery is recorded in an umbrella trail and will not be re-executed, preventing duplicate runs and breaking symlink cycles.
 
 During suite execution, the current working directory is temporarily switched to the suite script's directory, ensuring relative file operations resolve locally.
+
+### Subtests & Hierarchical Nesting
+
+By default, `testme` flattens all units across discovered suites into a single continuous sequence (`1..N`), streaming test points in real time as workers complete.
+
+When the `-n` / `--nested` flag is passed in TAP 14 mode, `testme` emits standard hierarchical [TAP 14 Subtests](https://testanything.org/tap-version-14-specification.html):
+- **Discovered Sub-Suites**: Each subdirectory discovered during descent automatically forms an indented subtest block under the parent suite.
+- **Programmatic In-Suite Subtests**: Suites can group child units using the `subtest` command (or `unit -subtest 1`):
+
+```tcl
+subtest -name "arithmetic" {
+  unit -name "addition"       { expr {2 + 2 == 4} }
+  unit -name "multiplication" { expr {3 * 3 == 9} }
+}
+```
+
+Subtests can nest to arbitrary depth (each level adding 4 spaces of indentation). If any child unit within a subtest fails, the parent subtest test point is marked `not ok`. In flat mode (without `-n`) or under TAP 13, `subtest` blocks submit their units directly to the flat roster.
 
 ---
 

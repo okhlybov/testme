@@ -30,19 +30,29 @@ if {$context eq {nested}} {
     if {$nargs < 1 || $nargs % 2 == 0} {error "usage: testme::unit ?-name ...? ?-tags ...? ?-skip reason? ?-todo reason? ?-anything ...? {code...}"}
     set opts [lrange $args 0 end-1]
     set code [lindex $args end]
+    if {[dict exists $opts -subtest] && [dict get $opts -subtest]} {
+      return [::testme::subtest_submit $opts $code]
+    }
     return [::testme::submit $opts $code]
   }
 
-  namespace export unit
-  catch {namespace eval :: {namespace import ::testme::unit}}
+  # Declare a subtest block containing child units
+  proc subtest {args} {
+    set nargs [llength $args]
+    if {$nargs < 1 || $nargs % 2 == 0} {error "usage: testme::subtest ?-name ...? ?-tags ...? ?-skip reason? ?-todo reason? {code...}"}
+    set opts [lrange $args 0 end-1]
+    set code [lindex $args end]
+    return [::testme::subtest_submit $opts $code]
+  }
+
+  namespace export unit subtest
+  catch {namespace eval :: {namespace import ::testme::unit ::testme::subtest}}
 
 }
 
 
 ### Toplevel context: the driver face
 if {$context eq {toplevel}} {
-
-  package require Thread
 
   # A bare require (an interactive shell, a sourced snippet) has no suite script to rerun;
   # refuse it with an explicit diagnostic instead of mistaking the shell itself for a suite
@@ -59,9 +69,8 @@ if {$context eq {toplevel}} {
 
   # The TAP dialect: 14 streams the test points in completion order (real-time progress
   # for the units taking wildly differing times); 13 orders them strictly for the sake
-  # of the older consumers - the command line and TESTME_TAP select
+  # of the older consumers - the command line and TESTME_OPTS select
   set tap 0
-  if {[info exists ::env(TESTME_TAP)] && $::env(TESTME_TAP) == 13} { set tap 13 }
 
   # The driver policy flags, set by the command line options below
   variable verbose false
@@ -70,6 +79,8 @@ if {$context eq {toplevel}} {
   variable premature false
   variable quiet false
   variable staging false
+  variable nested false
+  variable serial false
 
   # The driver command line is consumed by the clip parser;
   # -j/--jobs overrides the worker count, --tap selects the TAP dialect
@@ -88,6 +99,8 @@ if {$context eq {toplevel}} {
       {{--jobs= -j=} -info "set maximum number of parallel units" -default 0 -slot jobs}
       {{-S= --source=} -info "set suite script name to discover during descent" -default {} -slot source_name}
       {{--tap=} -info "emit the TAP version: 14 (streamed) or 13 (strictly ordered)" -default 14 -slot tap}
+      {{-n --nested} -info "emit nested TAP 14 subtests" -default true -slot nested}
+      {{-s --serial} -info "run units sequentially without thread pool" -default true -slot serial}
       {{-v --verbose} -info "dump unit output to standard error channel" -default true -slot verbose}
       {{-F --full-dump} -info "dump unit output for succeeded tests as well" -default true -slot full}
       {{-K --keep} -info "keep temporary directories & files" -default false -slot cleanup}
@@ -107,7 +120,41 @@ if {$context eq {toplevel}} {
         exit 0
       }}
     }
-    set filters [clip::parse $::argv $opts]
+    set filters [list]
+    if {[info exists ::env(TESTME_OPTS)] && [string trim $::env(TESTME_OPTS)] ne {}} {
+      if {[catch { list {*}$::env(TESTME_OPTS) } envArgs]} {
+        error "testme: invalid TESTME_OPTS: $envArgs"
+      }
+      if {[catch { clip::parse $envArgs $opts } envFilters]} {
+        error "testme: invalid TESTME_OPTS: $envFilters"
+      }
+      if {$jobs != 0 && (![string is integer -strict $jobs] || $jobs <= 0)} {
+        error "testme: invalid TESTME_OPTS: invalid job count: $jobs"
+      }
+      if {$serial && $jobs != 0} {
+        error "testme: invalid TESTME_OPTS: -s/--serial conflicts with -j/--jobs"
+      }
+      if {$tap != 0 && $tap != 13 && $tap != 14} {
+        error "testme: invalid TESTME_OPTS: unsupported TAP version: $tap"
+      }
+      set filters $envFilters
+    }
+    set envSerial $serial
+    set envJobs $jobs
+    set serial false
+    set jobs 0
+    set cliFilters [clip::parse $::argv $opts]
+    set cliHasSerial $serial
+    set cliHasJobs [expr {$jobs != 0}]
+    if {$cliHasSerial && $cliHasJobs} {
+      puts stderr "testme: -s/--serial conflicts with -j/--jobs"
+      exit 1
+    }
+    if {!$cliHasSerial && !$cliHasJobs} {
+      set serial $envSerial
+      set jobs $envJobs
+    }
+    lappend filters {*}$cliFilters
   } err]} {
     puts stderr $err
     exit 1
@@ -116,11 +163,25 @@ if {$context eq {toplevel}} {
     puts stderr "testme: invalid job count: $jobs"
     exit 1
   }
+  if {$serial && $jobs != 0} {
+    puts stderr "testme: -s/--serial conflicts with -j/--jobs"
+    exit 1
+  }
+  if {!$serial} {
+    if {[catch {package require Thread}]} {
+      if {$jobs != 0} {
+        puts stderr "testme: -j/--jobs requires the Thread package"
+        exit 1
+      }
+      set serial true
+    }
+  }
   if {$tap == 0} { set tap 14 }
   if {$tap != 13 && $tap != 14} {
     puts stderr "testme: unsupported TAP version: $tap"
     exit 1
   }
+  if {$tap != 14} { set nested false }
   foreach arg $filters {
     switch -glob -- $arg {
       +* { lappend include [string trimleft $arg +] }
@@ -133,12 +194,9 @@ if {$context eq {toplevel}} {
   # before any suite changes the current directory
   variable origin [pwd]
 
-  # The worker count is sized after the machine; the command line -j takes precedence,
-  # then the TESTME_JOBS environment variable, then the platform detection
+  # The worker count is sized after the machine; the -j option (via command line or
+  # TESTME_OPTS) takes precedence, otherwise platform detection determines the core count
   proc CoreCount {} {
-    if {[info exists ::env(TESTME_JOBS)] && [string is integer -strict $::env(TESTME_JOBS)] && $::env(TESTME_JOBS) > 0} {
-      return $::env(TESTME_JOBS)
-    }
     # Linux: the kernel cpu list, then the cpuinfo tally
     if {![catch {set f [open /sys/devices/system/cpu/online r]}]} {
       set n 0
@@ -282,9 +340,14 @@ if {$context eq {toplevel}} {
 
   # Idle workers must exist up front: pools relying on lazy worker spawning
   # were observed to dispatch queued jobs one at a time, defeating parallelism
-  variable cores [expr {$jobs > 0 ? $jobs : [CoreCount]}]
-  variable pool [tpool::create -minworkers $cores -maxworkers $cores]
+  variable cores 1
+  variable pool {}
+  if {!$serial} {
+    set cores [expr {$jobs > 0 ? $jobs : [CoreCount]}]
+    set pool [tpool::create -minworkers $cores -maxworkers $cores]
+  }
   variable pending [dict create]
+  variable serialQueue [list]
   variable boxes [list]
   variable nboxes 0
   variable index 0
@@ -297,9 +360,26 @@ if {$context eq {toplevel}} {
   variable streaming 0
   variable where [dict create]
   variable doomed 0
+  variable nscopes 0
+  variable scopes [dict create 0 [dict create \
+    id 0 \
+    parent -1 \
+    depth 0 \
+    name {} \
+    items [list] \
+    pending 0 \
+    skip {} \
+    todo {} \
+  ]]
+  variable boxScope [dict create]
+  variable boxScopeStack [dict create]
+  variable unitScope [dict create]
+  variable unitOutcome [dict create]
+  variable scopeFailed [dict create]
+  variable nextTop 1
 
   # Enter submit phase: the units accumulate while the suite tree is being discovered
-  tpool::suspend $pool
+  if {!$serial} { tpool::suspend $pool }
 
   # Seed the context for rerunning this very script as a nested suite
   set script [expr {$source_name ne {} ? $source_name : [file tail $::argv0]}]
@@ -316,7 +396,9 @@ if {$context eq {toplevel}} {
   # bare invocation returns the whole record, arguments form a chained dict get
   variable worker {{unit paths version} {
     # Preserve the real puts for the pass-through channels
-    catch {rename puts ::tcl::puts}
+    if {![llength [info commands ::tcl::puts]]} {
+      catch {interp alias {} ::tcl::puts {} ::puts}
+    }
     set ::stdout [list]
     set ::stderr [list]
     array set ::partial {stdout 0 stderr 0}
@@ -433,7 +515,10 @@ if {$context eq {toplevel}} {
     } else {
       set status error
     }
-    list $status $result $options $::stdout $::stderr
+    set out $::stdout
+    set err $::stderr
+    catch {unset -nocomplain ::stdout ::stderr ::partial ::skipped ::skip_reason ::record}
+    list $status $result $options $out $err
   }}
   # The shared elements of two lists
   proc Intersect {a b} {
@@ -454,6 +539,73 @@ if {$context eq {toplevel}} {
     return $path
   }
 
+  # Allocates a new scope under a parent scope
+  proc CreateScope {name parent {opts {}}} {
+    variable nscopes
+    variable scopes
+    set id [incr nscopes]
+    set parentDepth [dict get $scopes $parent depth]
+    set depth [expr {$parentDepth + 1}]
+    set skip {}; set todo {}
+    if {[dict exists $opts -skip]} { set skip [dict get $opts -skip] }
+    if {[dict exists $opts -todo]} { set todo [dict get $opts -todo] }
+    dict set scopes $id [dict create \
+      id $id \
+      parent $parent \
+      depth $depth \
+      name $name \
+      items [list] \
+      pending 0 \
+      skip $skip \
+      todo $todo \
+    ]
+    dict update scopes $parent parentDict {
+      dict lappend parentDict items [list scope $id]
+    }
+    return $id
+  }
+
+  # Receive a subtest block submission from a suite
+  proc SubtestSubmit {box opts code} {
+    variable nested
+    variable boxScope
+    variable boxScopeStack
+    variable scopes
+    variable index
+    set name {}
+    if {[dict exists $opts -name]} { set name [dict get $opts -name] }
+    if {$name eq {}} {
+      incr index
+      set name "subtest$index"
+    }
+    set currentScope 0
+    if {[dict exists $boxScope $box]} {
+      set currentScope [dict get $boxScope $box]
+    }
+    if {![dict exists $opts -skip] && [dict exists $scopes $currentScope skip] && [dict get $scopes $currentScope skip] ne {}} {
+      dict set opts -skip [dict get $scopes $currentScope skip]
+    }
+    if {![dict exists $opts -todo] && [dict exists $scopes $currentScope todo] && [dict get $scopes $currentScope todo] ne {}} {
+      dict set opts -todo [dict get $scopes $currentScope todo]
+    }
+    if {!$nested} {
+      $box eval $code
+      return
+    }
+    set subScope [CreateScope $name $currentScope $opts]
+    dict set boxScope $box $subScope
+    dict lappend boxScopeStack $box $subScope
+    try {
+      $box eval $code
+    } finally {
+      set stack [dict get $boxScopeStack $box]
+      set stack [lrange $stack 0 end-1]
+      dict set boxScopeStack $box $stack
+      dict set boxScope $box [lindex $stack end]
+    }
+    return $subScope
+  }
+
   # Receive a unit submission from a suite (through the ::testme::submit alias);
   # the ticket returned to the submitting suite is the unit number in the TAP plan
   proc Submit {box opts code} {
@@ -468,10 +620,26 @@ if {$context eq {toplevel}} {
     variable version
     variable cleanup
     variable stage
+    variable nested
+    variable serial
+    variable serialQueue
+    variable boxScope
+    variable scopes
+    variable unitScope
     set name {}; set skip {}; set todo {}
     if {[dict exists $opts -name]} { set name [dict get $opts -name] }
     if {[dict exists $opts -skip]} { set skip [dict get $opts -skip] }
     if {[dict exists $opts -todo]} { set todo [dict get $opts -todo] }
+    set currentScope 0
+    if {[dict exists $boxScope $box]} {
+      set currentScope [dict get $boxScope $box]
+    }
+    if {$skip eq {} && [dict exists $scopes $currentScope skip] && [dict get $scopes $currentScope skip] ne {}} {
+      set skip [dict get $scopes $currentScope skip]
+    }
+    if {$todo eq {} && [dict exists $scopes $currentScope todo] && [dict get $scopes $currentScope todo] ne {}} {
+      set todo [dict get $scopes $currentScope todo]
+    }
     set tags [list]
     catch {set tags [dict get $opts -tags]}
     # Squeeze out empty {} tags
@@ -484,6 +652,18 @@ if {$context eq {toplevel}} {
       set skip {deselected by tags}
     }
     dict set units $index [list $name $skip $todo]
+    if {$nested} {
+      dict set unitScope $index $currentScope
+      dict update scopes $currentScope s {
+        dict lappend s items [list unit $index]
+        dict incr s pending
+      }
+      set p [dict get $scopes $currentScope parent]
+      while {$p >= 0} {
+        dict update scopes $p ps { dict incr ps pending }
+        set p [dict get $scopes $p parent]
+      }
+    }
     if {$skip ne {}} {
       # A skipped unit is planned but never run
       Deliver $index ok {} {} {} {}
@@ -504,8 +684,12 @@ if {$context eq {toplevel}} {
     set suitePaths {}
     catch {set suitePaths [$box eval {tcl::tm::path list}]}
     if {![llength $suitePaths]} { set suitePaths [tcl::tm::path list] }
-    set job [tpool::post -nowait $pool [list apply $worker $record $suitePaths $version]]
-    dict set pending $job $index
+    if {$serial} {
+      lappend serialQueue [list $index $record $suitePaths $version]
+    } else {
+      set job [tpool::post -nowait $pool [list apply $worker $record $suitePaths $version]]
+      dict set pending $job $index
+    }
     return $index
   }
 
@@ -527,14 +711,14 @@ if {$context eq {toplevel}} {
     foreach path $composed { dict set ran [Identity $path] 1 }
     set suitePaths {}
     catch {set suitePaths [$box eval {tcl::tm::path list}]}
-    Descend $root $suitePaths
+    Descend $root $suitePaths $box
   }
 
   # Create an isolated suite interpreter over $root and run the script there;
   # the unit submissions arrive synchronously through the alias.
   # The current directory of the suite is its own directory (the boxes and the driver
   # share the thread's one), so the units inherit a meaningful origin directory
-  proc Box {root {scriptName {}} {tmpaths {}}} {
+  proc Box {root {scriptName {}} {tmpaths {}} {initialScope 0}} {
     variable Context
     variable boxes
     variable nboxes
@@ -546,6 +730,11 @@ if {$context eq {toplevel}} {
     variable failed
     variable quiet
     variable verbose
+    variable nested
+    variable boxScope
+    variable boxScopeStack
+    variable unitScope
+    variable scopes
     if {$scriptName eq {}} {
       set scriptName [dict get $Context -script]
     }
@@ -561,6 +750,8 @@ if {$context eq {toplevel}} {
     lappend boxes $box
     set script [file join $root $scriptName]
     dict set where $box [file normalize $script]
+    dict set boxScope $box $initialScope
+    dict set boxScopeStack $box [list $initialScope]
     set wd [pwd]
     try {
       if {[catch {
@@ -585,6 +776,9 @@ if {$context eq {toplevel}} {
         }} $tmpaths]
         # The unit submissions cross the interpreter boundary through this alias
         interp alias $box ::testme::submit {} ::testme::Submit $box
+        interp alias $box ::testme::subtest_submit {} ::testme::SubtestSubmit $box
+        $box eval {namespace eval ::testme {namespace export unit subtest}}
+        $box eval {catch {namespace import ::testme::unit ::testme::subtest}}
         # Suite code must not terminate the process either
         $box eval {proc exit {args} {return -code error "the suite code requested to terminate the process: exit $args"}}
         # The accumulator shared by the suite layer
@@ -623,6 +817,18 @@ if {$context eq {toplevel}} {
         # A failed suite script becomes a synthetic failed unit so the roster stays honest
         incr index
         dict set units $index [list [Relative [file normalize $script]] {} {}]
+        if {$nested} {
+          dict set unitScope $index $initialScope
+          dict update scopes $initialScope s {
+            dict lappend s items [list unit $index]
+            dict incr s pending
+          }
+          set p [dict get $scopes $initialScope parent]
+          while {$p >= 0} {
+            dict update scopes $p ps { dict incr ps pending }
+            set p [dict get $scopes $p parent]
+          }
+        }
         Deliver $index error "suite script failed: $err" {} {} {}
       }
       Retire $box $root
@@ -635,10 +841,22 @@ if {$context eq {toplevel}} {
   # in the immediate subdirectories of $root; called once a suite script has finished,
   # so the scripts it composed by sourcing are known before discovery reaches them;
   # deeper levels are reached through the completion of the immediate ones
-  proc Descend {root {tmpaths {}}} {
+  proc Descend {root {tmpaths {}} {parentBox {}}} {
     variable Context
+    variable nested
+    variable boxScope
+    set parentScope 0
+    if {$nested && $parentBox ne {} && [dict exists $boxScope $parentBox]} {
+      set parentScope [dict get $boxScope $parentBox]
+    }
     foreach source [glob -nocomplain -directory $root [file join * [dict get $Context -script]]] {
-      Box [file dirname [file normalize $source]] [dict get $Context -script] $tmpaths
+      set subDir [file dirname [file normalize $source]]
+      set childScope 0
+      if {$nested} {
+        set scopeName [file tail $subDir]
+        set childScope [CreateScope $scopeName $parentScope]
+      }
+      Box $subDir [dict get $Context -script] $tmpaths $childScope
     }
   }
 
@@ -732,6 +950,146 @@ if {$context eq {toplevel}} {
     }
   }
 
+  # Format a single unit test line and its diagnostics for nested output
+  proc FormatUnitLine {depth localId id} {
+    variable units
+    variable unitOutcome
+    set indent [string repeat " " [expr {$depth * 4}]]
+    lassign [dict get $units $id] name skip todo
+    set name [CleanTapLine $name]
+    set skip [CleanTapLine $skip]
+    set todo [CleanTapLine $todo]
+    set lines [list]
+    if {$skip ne {}} {
+      lappend lines "${indent}ok $localId - $name # SKIP $skip"
+      return $lines
+    }
+    lassign [dict get $unitOutcome $id] status result options stdout stderr
+    set directive {}
+    if {$todo ne {}} { set directive " # TODO $todo" }
+    if {$status eq {ok}} {
+      lappend lines "${indent}ok $localId - $name$directive"
+    } elseif {$status eq {skipped}} {
+      lappend lines "${indent}ok $localId - $name # SKIP [CleanTapLine $result]"
+    } else {
+      lappend lines "${indent}not ok $localId - $name$directive"
+      if {[dict exists $options -errorinfo]} {
+        set message [dict get $options -errorinfo]
+      } elseif {$result ne {}} {
+        set message $result
+      } else {
+        set message {unit failed}
+      }
+      set message [string trimright $message " \t\n"]
+      lappend lines "${indent}  ---"
+      lappend lines "${indent}  message: |"
+      foreach mline [split $message \n] {
+        lappend lines "${indent}    $mline"
+      }
+      lappend lines "${indent}  ..."
+    }
+    return $lines
+  }
+
+  # Format an entire scope and all its children for nested output
+  proc FormatScopeLines {s} {
+    variable scopes
+    variable scopeFailed
+    set depth [dict get $scopes $s depth]
+    set name [dict get $scopes $s name]
+    set items [dict get $scopes $s items]
+    set indent [string repeat " " [expr {$depth * 4}]]
+    set parentIndent [string repeat " " [expr {($depth - 1) * 4}]]
+    set lines [list]
+    if {$depth > 0} {
+      lappend lines "${parentIndent}# Subtest: $name"
+    }
+    set count [llength $items]
+    if {$count > 0} {
+      lappend lines "${indent}1..$count"
+    } else {
+      lappend lines "${indent}1..0 # SKIP no units discovered"
+    }
+    set localId 0
+    foreach item $items {
+      incr localId
+      lassign $item kind id
+      if {$kind eq {unit}} {
+        set ulines [FormatUnitLine $depth $localId $id]
+        foreach ul $ulines { lappend lines $ul }
+      } else {
+        set slines [FormatScopeLines $id]
+        foreach sl $slines { lappend lines $sl }
+        set childFailed 0
+        if {[dict exists $scopeFailed $id] && [dict get $scopeFailed $id]} {
+          set childFailed 1
+        }
+        set childName [CleanTapLine [dict get $scopes $id name]]
+        set childSkip [CleanTapLine [dict get $scopes $id skip]]
+        set childTodo [CleanTapLine [dict get $scopes $id todo]]
+        if {$childSkip ne {}} {
+          lappend lines "${indent}ok $localId - $childName # SKIP $childSkip"
+        } else {
+          set cdirective {}
+          if {$childTodo ne {}} { set cdirective " # TODO $childTodo" }
+          if {$childFailed && $childTodo eq {}} {
+            lappend lines "${indent}not ok $localId - $childName$cdirective"
+          } else {
+            lappend lines "${indent}ok $localId - $childName$cdirective"
+          }
+        }
+      }
+    }
+    return $lines
+  }
+
+  # Print the ready prefix of the nested roster (TAP 14)
+  proc FlushNested {} {
+    variable scopes
+    variable nextTop
+    variable unitOutcome
+    variable scopeFailed
+    set items [dict get $scopes 0 items]
+    set total [llength $items]
+    while {$nextTop <= $total} {
+      set item [lindex $items [expr {$nextTop - 1}]]
+      lassign $item kind id
+      if {$kind eq {unit}} {
+        if {![dict exists $unitOutcome $id]} {
+          break
+        }
+        set lines [FormatUnitLine 0 $nextTop $id]
+        foreach line $lines { Say $line }
+        incr nextTop
+      } else {
+        if {[dict get $scopes $id pending] > 0} {
+          break
+        }
+        set lines [FormatScopeLines $id]
+        foreach line $lines { Say $line }
+        set childFailed 0
+        if {[dict exists $scopeFailed $id] && [dict get $scopeFailed $id]} {
+          set childFailed 1
+        }
+        set childName [CleanTapLine [dict get $scopes $id name]]
+        set childSkip [CleanTapLine [dict get $scopes $id skip]]
+        set childTodo [CleanTapLine [dict get $scopes $id todo]]
+        if {$childSkip ne {}} {
+          Say "ok $nextTop - $childName # SKIP $childSkip"
+        } else {
+          set cdirective {}
+          if {$childTodo ne {}} { set cdirective " # TODO $childTodo" }
+          if {$childFailed && $childTodo eq {}} {
+            Say "not ok $nextTop - $childName$cdirective"
+          } else {
+            Say "ok $nextTop - $childName$cdirective"
+          }
+        }
+        incr nextTop
+      }
+    }
+  }
+
   # Print the ready prefix of the roster; the TAP 13 dialect requires ascending
   # test numbers, so out-of-order completions are held back until their turn comes
   proc Flush {} {
@@ -753,6 +1111,77 @@ if {$context eq {toplevel}} {
     variable inbox
     variable streaming
     variable tap
+    variable nested
+    variable unitOutcome
+    variable unitScope
+    variable scopes
+    variable scopeFailed
+    variable passed
+    variable failed
+    variable verbose
+    variable full
+    variable cleanup
+    variable stage
+    variable origin
+    variable units
+    if {$nested} {
+      lassign [dict get $units $id] name skip todo
+      # The channel dumps for the failed units (all of them under -F)
+      if {$verbose && ($full || $status eq {error}) && ([llength $stdout] || [llength $stderr])} {
+        puts stderr {}
+        puts stderr "- $name"
+        if {[llength $stdout]} {
+          puts stderr "-- stdout:"
+          foreach line $stdout { puts stderr $line }
+        }
+        if {[llength $stderr]} {
+          puts stderr "-- stderr:"
+          foreach line $stderr { puts stderr $line }
+        }
+      }
+      # The per-unit logs: the retained garbage documents the run
+      if {!$cleanup && ([llength $stdout] || [llength $stderr])} {
+        set tag $name
+        regsub -all {\W} $tag {_} tag
+        set dir [expr {$stage ne {false} ? $stage : $origin}]
+        foreach {chan data} [list stdout $stdout stderr $stderr] {
+          if {![llength $data]} {continue}
+          try {
+            set f [open [file join $dir $id-$tag-$chan.out] w]
+            try {
+              foreach line $data { puts $f $line }
+            } finally {
+              close $f
+            }
+          } on error {} {}
+        }
+      }
+      if {$skip ne {} || $status eq {ok} || $status eq {skipped}} {
+        incr passed
+      } else {
+        if {$todo eq {}} { incr failed }
+      }
+      dict set unitOutcome $id [list $status $result $options $stdout $stderr]
+      set scope [dict get $unitScope $id]
+      if {$status eq {error} && $todo eq {}} {
+        dict set scopeFailed $scope 1
+        set p [dict get $scopes $scope parent]
+        while {$p >= 0} {
+          dict set scopeFailed $p 1
+          set p [dict get $scopes $p parent]
+        }
+      }
+      dict update scopes $scope s { dict incr s pending -1 }
+      set p [dict get $scopes $scope parent]
+      while {$p >= 0} {
+        dict update scopes $p ps { dict incr ps pending -1 }
+        set p [dict get $scopes $p parent]
+      }
+      if {$streaming} {
+        FlushNested
+      }
+      return
+    }
     if {$tap >= 14 && $streaming} {
       Emit $id $status $result $options $stdout $stderr
     } else {
@@ -767,6 +1196,12 @@ if {$context eq {toplevel}} {
   proc Bailout {} {
     variable pool
     variable pending
+    variable serial
+    variable serialQueue
+    if {$serial} {
+      set serialQueue [list]
+      return
+    }
     foreach job [tpool::cancel $pool [dict keys $pending]] {
       dict unset pending $job
     }
@@ -848,13 +1283,14 @@ if {$context eq {toplevel}} {
   proc Teardown {} {
     variable boxes
     variable pool
+    variable serial
     variable staging
     variable stage
     variable origin
     variable cleanup
     variable verbose
     foreach box $boxes { catch {interp delete $box} }
-    tpool::release $pool
+    if {!$serial && $pool ne {}} { catch {tpool::release $pool} }
     if {$staging && $stage ne {false} && $cleanup && $stage ne [pwd] && $stage ne $origin} {
       MakeWritable $stage
       if {[catch {file delete -force -- $stage}]} {
@@ -880,10 +1316,12 @@ if {$context eq {toplevel}} {
   # for a pool holding queued jobs cannot be released
   if {[catch {Box [dict get $Context -root] [file tail $::argv0]} err opts]} {
     if {!$quiet || $verbose} { puts stderr $err }
-    foreach x [tpool::cancel $pool [dict keys $pending]] {
-      dict unset pending $x
+    if {!$serial} {
+      foreach x [tpool::cancel $pool [dict keys $pending]] {
+        dict unset pending $x
+      }
+      tpool::resume $pool
     }
-    tpool::resume $pool
     Teardown
     Say {Bail out!}
     exit 1
@@ -891,7 +1329,14 @@ if {$context eq {toplevel}} {
 
   # The plan: the total is known once the whole tree has been submitted;
   # the skip-all form covers the empty roster
-  if {$index > 0} {
+  if {$nested} {
+    set topCount [llength [dict get $scopes 0 items]]
+    if {$topCount > 0} {
+      Say "1..$topCount"
+    } else {
+      Say "1..0 # SKIP no units discovered"
+    }
+  } elseif {$index > 0} {
     Say "1..$index"
   } else {
     Say "1..0 # SKIP no units discovered"
@@ -901,7 +1346,9 @@ if {$context eq {toplevel}} {
   # The submission phase is over, so the pending set only shrinks.
   # The outcomes stashed during discovery (skipped units, failed suites) join the stream now
   set streaming 1
-  if {$tap >= 14} {
+  if {$nested} {
+    FlushNested
+  } elseif {$tap >= 14} {
     foreach id [lsort -integer [dict keys $inbox]] {
       lassign [dict get $inbox $id] status result options stdout stderr
       dict unset inbox $id
@@ -910,24 +1357,40 @@ if {$context eq {toplevel}} {
   } else {
     Flush
   }
-  tpool::resume $pool
-  while {[dict size $pending] > 0 && !$doomed} {
-    # tpool::wait blocks until at least one listed job completes
-    # and returns the list of the completed handles;
-    # each handle must be reaped with tpool::get and dropped from the wait list at once
-    foreach job [tpool::wait $pool [dict keys $pending]] {
-      set id [dict get $pending $job]
-      dict unset pending $job
-      # The worker packs the unit outcome; a catch failure here means the runner machinery itself broke
-      if {[catch {tpool::get $pool $job} outcome]} {
+  if {$serial} {
+    foreach item $serialQueue {
+      if {$doomed} { break }
+      lassign $item id record paths ver
+      if {[catch {apply $worker $record $paths $ver} outcome]} {
         set outcome [list error $outcome {} {} {}]
       }
       if {$doomed} { continue }
       lassign $outcome status result options stdout stderr
       Deliver $id $status $result $options $stdout $stderr
       if {$premature && $failed > 0} {
-        # The first failure triggers Bailout to cancel queued units and drain in-flight ones
         set doomed 1
+      }
+    }
+  } else {
+    tpool::resume $pool
+    while {[dict size $pending] > 0 && !$doomed} {
+      # tpool::wait blocks until at least one listed job completes
+      # and returns the list of the completed handles;
+      # each handle must be reaped with tpool::get and dropped from the wait list at once
+      foreach job [tpool::wait $pool [dict keys $pending]] {
+        set id [dict get $pending $job]
+        dict unset pending $job
+        # The worker packs the unit outcome; a catch failure here means the runner machinery itself broke
+        if {[catch {tpool::get $pool $job} outcome]} {
+          set outcome [list error $outcome {} {} {}]
+        }
+        if {$doomed} { continue }
+        lassign $outcome status result options stdout stderr
+        Deliver $id $status $result $options $stdout $stderr
+        if {$premature && $failed > 0} {
+          # The first failure triggers Bailout to cancel queued units and drain in-flight ones
+          set doomed 1
+        }
       }
     }
   }
