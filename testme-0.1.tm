@@ -263,8 +263,11 @@ if {$context eq {toplevel}} {
     lappend roots /tmp
     set dir ""
     foreach r $roots {
-      set dir [file join $r testme.[expr {int(rand()*999999)}]]
-      if {![catch {file mkdir $dir}]} {return $dir}
+      for {set attempt 0} {$attempt < 16} {incr attempt} {
+        set tag "[pid].[clock microseconds].[expr {int(rand()*999999)}]"
+        set dir [file join $r testme.$tag]
+        if {![file exists $dir] && ![catch {file mkdir $dir}]} { return $dir }
+      }
     }
     error "failed to create temporary directory $dir"
   }
@@ -316,6 +319,10 @@ if {$context eq {toplevel}} {
     catch {rename puts ::tcl::puts}
     set ::stdout [list]
     set ::stderr [list]
+    array set ::partial {stdout 0 stderr 0}
+    set ::skipped 0
+    set ::skip_reason {}
+
     proc Puts {args} {
       set xargs $args
       set newline 1
@@ -325,30 +332,58 @@ if {$context eq {toplevel}} {
       }
       if {[llength $args] == 1} {
         set chan stdout
+        set text [lindex $args 0]
+      } elseif {[llength $args] == 2} {
+        lassign $args chan text
       } else {
-        set chan [lindex $args 0]
-        set args [lrange $args 1 end]
+        tailcall ::tcl::puts {*}$xargs
       }
       if {$chan eq {stdout} || $chan eq {stderr}} {
-        if {$newline} {
-          foreach arg $args {lappend ::$chan $arg}
+        set lines [split $text \n]
+        set first [lindex $lines 0]
+        set rest [lrange $lines 1 end]
+        if {$::partial($chan) && [llength [set ::$chan]] > 0} {
+          lset ::$chan end "[lindex [set ::$chan] end]$first"
         } else {
-          set ::$chan [concat [lrange [set ::$chan] 0 end-1] "[lindex [set ::$chan] end]$args"]
+          lappend ::$chan $first
         }
+        foreach line $rest { lappend ::$chan $line }
+        set ::partial($chan) [expr {!$newline}]
       } else {
         ::tcl::puts {*}$xargs
       }
     }
-    proc Skip {{reason {}}} {return -code 1073741823 -level 0 $reason}
+    proc Skip {{reason {}}} {
+      set ::skipped 1
+      set ::skip_reason $reason
+      return -code 1073741823 -level 0 $reason
+    }
     proc Context {args} {
       if {![llength $args]} {return $::record}
       tailcall dict get $::record {*}$args
     }
     set ::record $unit
+    set envSnapshot [array get ::env]
     set u [interp create]
     try {
+      # Isolate ::env so the unit operates on a private copy without mutating the process-wide environment
+      $u eval [list apply {{snapshot} {
+        trace add variable ::env unset {apply {{args} {return -code error "blocked"}}}
+        catch {unset -nocomplain ::env}
+        array set ::env $snapshot
+      }} $envSnapshot]
       # The module lookup paths so the unit code may load the companions (buildme etc.)
       interp eval $u [list tcl::tm::path add {*}$paths]
+      foreach p $paths {
+        set extraDir [file join $p extra]
+        if {[file isdirectory $extraDir]} {
+          foreach tm [glob -nocomplain -directory $extraDir *.tm] {
+            if {[regexp {^([^-]+)-(\d+(?:\.\d+)*)\.tm$} [file tail $tm] -> pkg ver]} {
+              interp eval $u [list package ifneeded $pkg $ver [list apply {{f p v} {source $f; package provide $p $v}} $tm $pkg $ver]]
+            }
+          }
+        }
+      }
       # The unit layer face of the testme package: the helpers only
       interp eval $u [list package ifneeded testme $version [list package provide testme $version]]
       interp eval $u {namespace eval ::testme {}}
@@ -390,14 +425,16 @@ if {$context eq {toplevel}} {
     } finally {
       catch {interp delete $u}
     }
-    switch -- $code {
-      0 {set status ok}
-      1073741823 {set status skipped}
-      default {set status error}
+    if {$code == 1073741823 || $::skipped} {
+      set status skipped
+      if {$code != 1073741823} { set result $::skip_reason }
+    } elseif {$code == 0} {
+      set status ok
+    } else {
+      set status error
     }
-    return [list $status $result $options $::stdout $::stderr]
+    list $status $result $options $::stdout $::stderr
   }}
-
   # The shared elements of two lists
   proc Intersect {a b} {
     set r {}
@@ -531,6 +568,14 @@ if {$context eq {toplevel}} {
           foreach x [lreverse $paths] {
             # Squash duplicates in the module lookup path
             if {[lsearch $current $x] < 0} { tcl::tm::path add $x }
+            set extraDir [file join $x extra]
+            if {[file isdirectory $extraDir]} {
+              foreach tm [glob -nocomplain -directory $extraDir *.tm] {
+                if {[regexp {^([^-]+)-(\d+(?:\.\d+)*)\.tm$} [file tail $tm] -> pkg ver]} {
+                  package ifneeded $pkg $ver [list apply {{f p v} {source $f; package provide $p $v}} $tm $pkg $ver]
+                }
+              }
+            }
           }
         }} $tmpaths]
         # The unit submissions cross the interpreter boundary through this alias
@@ -551,7 +596,9 @@ if {$context eq {toplevel}} {
           rename source ::testme::source
           proc source {args} {
             if {[llength $args]} {
-              catch {lappend ::testme::sourced [file normalize [lindex $args end]]}
+              set target {}
+              catch {set target [file normalize [lindex $args end]]}
+              if {$target ne {}} { lappend ::testme::sourced $target }
             }
             uplevel 1 [linsert $args 0 ::testme::source]
           }
@@ -597,6 +644,11 @@ if {$context eq {toplevel}} {
     if {!$quiet} { puts $text }
   }
 
+  # Sanitize single-line TAP fields so embedded newlines cannot corrupt the stream
+  proc CleanTapLine {text} {
+    string map [list \r\n " " \n " " \r " "] $text
+  }
+
   # Print a single TAP test line with its directives and, for a failure, a YAML diagnostic;
   # dump the captured unit channels under -v/-F and log them into per-unit files under -K
   proc Emit {id status result options stdout stderr} {
@@ -609,6 +661,9 @@ if {$context eq {toplevel}} {
     variable stage
     variable origin
     lassign [dict get $units $id] name skip todo
+    set name [CleanTapLine $name]
+    set skip [CleanTapLine $skip]
+    set todo [CleanTapLine $todo]
     if {$skip ne {}} {
       incr passed
       Say "ok $id - $name # SKIP $skip"
@@ -622,7 +677,7 @@ if {$context eq {toplevel}} {
     } elseif {$status eq {skipped}} {
       # The unit skipped itself at run time
       incr passed
-      Say "ok $id - $name # SKIP $result"
+      Say "ok $id - $name # SKIP [CleanTapLine $result]"
     } else {
       # A TODO failure is an expected one: reported, but not counted against the verdict
       if {$todo eq {}} { incr failed }
@@ -849,7 +904,7 @@ if {$context eq {toplevel}} {
     Flush
   }
   tpool::resume $pool
-  while {[dict size $pending] > 0} {
+  while {[dict size $pending] > 0 && !$doomed} {
     # tpool::wait blocks until at least one listed job completes
     # and returns the list of the completed handles;
     # each handle must be reaped with tpool::get and dropped from the wait list at once
@@ -858,20 +913,14 @@ if {$context eq {toplevel}} {
       dict unset pending $job
       # The worker packs the unit outcome; a catch failure here means the runner machinery itself broke
       if {[catch {tpool::get $pool $job} outcome]} {
-        set outcome [list error $outcome {}]
+        set outcome [list error $outcome {} {} {}]
       }
-      if {$doomed} {
-        # The bailed out run drains the remainder silently
-        continue
-      }
+      if {$doomed} { continue }
       lassign $outcome status result options stdout stderr
       Deliver $id $status $result $options $stdout $stderr
       if {$premature && $failed > 0} {
-        # The first failure cancels the queued units; the in-flight ones finish silently
+        # The first failure triggers Bailout to cancel queued units and drain in-flight ones
         set doomed 1
-        foreach x [tpool::cancel $pool [dict keys $pending]] {
-          dict unset pending $x
-        }
       }
     }
   }

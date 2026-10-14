@@ -15,7 +15,8 @@ package require testme
 unit -name run-sandbox {
   package require buildme
   buildme::sandbox {
-    buildme::shell {cat data.txt}
+    set cat \[expr {\$::tcl_platform(platform) eq \"windows\" ? \"type\" : \"cat\"}\]
+    buildme::shell \"\$cat data.txt\"
     buildme::shell {echo newoutput > output.txt}
   }
 }
@@ -40,8 +41,9 @@ unit -name run-ro {
   package require buildme
   buildme::sandbox {
     # modify copied file (which would fail if permissions weren't made writable)
+    set cat \[expr {\$::tcl_platform(platform) eq \"windows\" ? \"type\" : \"cat\"}\]
     buildme::shell {echo modified >> readonly.txt}
-    buildme::shell {cat readonly.txt}
+    buildme::shell \"\$cat readonly.txt\"
     # create new file in sandbox
     buildme::shell {echo created > created.txt}
   }
@@ -49,9 +51,15 @@ unit -name run-ro {
 "]
   withfixture $pairs {
     # Make fixture files and directory read-only
-    file attributes [file join $dir readonly.txt] -permissions 0444
-    file attributes [file join $dir test.tcl] -permissions 0444
-    file attributes $dir -permissions 0555
+    if {$::tcl_platform(platform) eq "windows"} {
+      file attributes [file join $dir readonly.txt] -readonly 1
+      file attributes [file join $dir test.tcl] -readonly 1
+      file attributes $dir -readonly 1
+    } else {
+      file attributes [file join $dir readonly.txt] -permissions 0444
+      file attributes [file join $dir test.tcl] -permissions 0444
+      file attributes $dir -permissions 0555
+    }
     try {
       lassign [capture tclsh $dir/test.tcl -v -F] code out
       expect clean-exit [expr {$code == 0}]
@@ -59,7 +67,13 @@ unit -name run-ro {
       expect modified [expr {[string match {*modified*} $out]}]
     } finally {
       # restore permissions so fixture cleanup can remove dir
-      file attributes $dir -permissions 0755
+      if {$::tcl_platform(platform) eq "windows"} {
+        file attributes $dir -readonly 0
+        file attributes [file join $dir readonly.txt] -readonly 0
+        file attributes [file join $dir test.tcl] -readonly 0
+      } else {
+        file attributes $dir -permissions 0755
+      }
     }
   }
 }} $helpers $root]
@@ -101,12 +115,21 @@ unit -name run-watchdog {
   set f \[open \[file join \$sub file.txt\] w\]
   puts \$f {temporary}
   close \$f
-  # Make subdirectory unreadable/unwritable so immediate file delete -force fails on Linux
-  file attributes \$sub -permissions 0000
+  # Make subdirectory unreadable/unwritable on Linux, or hold file open on Windows
+  if {\$::tcl_platform(platform) eq \"windows\"} {
+    set lock \[open \[file join \$sub file.txt\] r\]
+  } else {
+    file attributes \$sub -permissions 0000
+  }
 
   # Immediate delete fails
   set failed \[catch {file delete -force -- \$target}\]
   if {!\$failed} { error {expected immediate delete to fail} }
+
+  # On Windows, close the lock handle so watchdog retries can clean it up
+  if {\$::tcl_platform(platform) eq \"windows\"} {
+    close \$lock
+  }
 
   # Spawn watchdog with short timeout
   buildme::SpawnWatchdog \$target 5

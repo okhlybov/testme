@@ -156,15 +156,18 @@ namespace eval ::buildme {
   proc shell {cmd} {
     variable stage
     if {$stage eq {}} { set stage [Field -stage] }
-    set cd "cd \"$stage\""
-    puts stdout "$cd && \\\n$cmd"
     set sh "/bin/sh"
+    set flag "-c"
     if {[info exists ::env(SHELL)] && $::env(SHELL) ne {}} {
       set sh $::env(SHELL)
-    } elseif {$::tcl_platform(platform) eq "windows" && [info exists ::env(COMSPEC)]} {
-      set sh $::env(COMSPEC)
+    } elseif {$::tcl_platform(platform) eq "windows"} {
+      set sh [expr {[info exists ::env(COMSPEC)] ? $::env(COMSPEC) : "cmd.exe"}]
+      set flag "/c"
     }
-    if {[catch {exec -ignorestderr $sh -c "$cd && $cmd" 2>@1} result opts]} {
+    set nativeStage [file nativename $stage]
+    set cd [expr {$flag eq "/c" ? "cd /d $nativeStage" : "cd \"$stage\""}]
+    puts stdout "$cd && \\\n$cmd"
+    if {[catch {exec -ignorestderr $sh $flag "$cd && $cmd" 2>@1} result opts]} {
       puts stderr $result
     } else {
       puts stdout $result
