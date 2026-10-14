@@ -1,171 +1,240 @@
 # testme - a Tcl testing pico framework
-Testme is a testing framework for the [Tcl](https://www.tcl-lang.org/) language.
+
+Testme is an agentic-ready, high-performance testing framework for the [Tcl](https://www.tcl-lang.org/) language (compatible with Tcl 8.6+ and Tcl 9.0+).
 
 ## Features
 
-- Parallel unit execution
-- Unit tagging & selective unit execution
-- [TAP](https://testanything.org/)-compatible output
+- **Parallel Unit Execution**: High-throughput execution across multi-core systems using native OS thread pools (`Thread` package).
+- **TAP 14 & TAP 13 Compliance**: Streams real-time [TAP](https://testanything.org/) 14 results as tests complete, with strict ascending TAP 13 fallback.
+- **Unit Tagging & Filtering**: Granular test selection via command-line tag inclusions (`+tag` / `tag`) and exclusions (`-tag`).
+- **Lexical Scoping with `testme::with`**: Scoped tag and parameter accumulation across nested blocks at both suite and unit levels.
+- **Strict Execution Containment**: Units run in isolated interpreter threads with private `::env` environments; unsafe calls like `exit` and `cd` are intercepted and reported as failures without destabilizing the runner.
+- **Output Channel Capture**: `stdout` and `stderr` channels are buffered per unit, preserving a clean TAP stream on standard output.
+- **Inline & Staged Execution Modes**: Explicit separation between `-origin` (read-only source directory where suite fixtures reside) and `-stage` (destination directory where files are copied or created).
+- **Extensible Companions**: Automatic module resolution for companion libraries in `extra/` (such as `buildme` for filesystem sandboxing and shell execution).
+
+---
 
 ## Prerequisites
 
-- Tcl 8.6+
-- (optional) POSIX environment (UNIX, Linux, Cygwin, MSYS2 etc.) for supplied TAP consumer [`tapview`](https://gitlab.com/esr/tapview)
+- **Tcl 8.6+** or **Tcl 9.0+**
+- **Thread package** (standard in active Tcl installations)
+- *(Optional)* POSIX shell environment for the included [`tapview`](https://gitlab.com/esr/tapview) viewer, or Tcl for the pure-Tcl `extra/tapme-0.tm` consumer.
+
+---
 
 ## Quickstart
 
-Execute test suite
+Run a test suite:
 
 ```shell
-tclsh test/testme.tcl
+tclsh test/test.tcl
 ```
 
-Execute test suite & dump units output to the stdandrd error channel
+Run tests and dump captured unit output for failures to `stderr`:
 
 ```shell
-tclsh test/testme.tcl -v
+tclsh test/test.tcl -v
 ```
 
-Filter test suite output with an external TAP consumer
+Run tests and format results with the included `tapview` consumer:
 
 ```shell
-tclsh test/testme.tcl | sh tapview
+tclsh test/test.tcl | sh tapview
 ```
 
-Filter test suite output with the pure Tcl tapme consumer
+Run tests and format with the companion `tapme` consumer:
 
 ```shell
-tclsh test/testme.tcl | tclsh tapme-0.tm
+tclsh test/test.tcl | tclsh extra/tapme-0.tm
 ```
 
-Review Testme command line options
+Separate TAP stream and error logs:
 
 ```shell
-tclsh test/testme.tcl -h
+tclsh test/test.tcl -v 2> testme.log | sh tapview
 ```
 
-Each unit is equipped with a set of tags used to describe the test.
-When a test suite containing the unit is run, this set is matched against tags specified in the command line to determine whether the particular unit is to be run or skipped.
-
-### Test suite invokation
-
-The toplevel Testme suite is executed with any Tcl shell such as default `tclsh`. The Testme command line options are to be specified atfer the script file name as shown above.
-
-#### Command line options
-
-The full list of available options can be retrieved with the `-h` flag. The other important options are discussed below.
-
-The `-j` option sets the maximum number of OS level threads to utilize during units execution. By default, Testme sets this to the number of detected processors/cores in the system.
-
-The Testme rigs for separation of TAP and unit outputs in the way that all TAP output is dumped to the standard output channel which can be filtered with external tools like `tapview` while all logging and error processing output is dumped into the standard error channel making it possible for the shell pipeline below
+View command-line options:
 
 ```shell
-tclsh test/testme.tcl -v 2> testme.log | sh tapview
+tclsh test/test.tcl -h
 ```
 
-where the unit execution progress and test suite summarizing report is done by the `tapview` while all error reports and log flood are accumulated in the `testme.log` file. The `-q` flag suppresses the TAP output on the standard output channel; the run verdict is then reported on the standard error channel by the internal TAP consumer when the tapme package is available in the module path, or as a single summary line otherwise. Conversely, the Testme is configured to suppress both standard and error outputs coming from Testme itself as well as from the units' code blocks (this also includes critical Tcl code errors). The `-v` flag enables all kinds of error and logging floods dumped to the standard error channel.
+---
 
-The default Testme behaviour is to execute all processed units that are not skipped in spite of encountered code errors or test failures, and to report the nested test suites whose processing failed as failed units as well. The `-e` flag can be used for bailing out on the first anomaly encountered, be it a unit failure or a suite processing error: the queued units are cancelled, the in-flight ones finish silently, their results are discarded and the run terminates with the failure status. *Skipping a unit is not considered a failure.*
+## Command Line Usage
 
-Upon completion, Testme exits with status 0 when all processed units succeeded, and with status 1 when at least one unit failed (bailing out included), making the suite suitable for driving from scripts and CI pipelines. Testme enforces no time limits on the units' execution; wrap the suite invocation into an external `timeout` command for the unattended runs.
+```
+usage: tclsh suite.tcl [options] [--] [+tag ...] [-tag ...] [tag ...]
+```
 
-The `-T` flag enables the management of a temporary directory for Testme and processed units. This includes creating a temporary directory, setting up the `TMPDIR` environment variable and deleting this directory after unit execution phase (unless the `-K` flag is also specified, which is intended to retain the unit-generated garbage). With the `-K` flag specified, the captured standard and error outputs of each processed unit are additionally dumped into per-unit log files (`id-name-channel.out`) residing in the managed staging directory (when `-T` is in effect) or in the current directory. *Refer to the Buildme module below.*
+### Options & Flags
 
-#### Command line arguments
+| Flag / Option | Description |
+| :--- | :--- |
+| `-j=`, `--jobs=` | Maximum number of parallel worker threads. Defaults to detected system CPU cores. |
+| `-S=`, `--source=` | Suite script filename to discover during subdirectory descent (defaults to script name of `$::argv0`). |
+| `--tap=` | TAP protocol dialect: `14` (default, streamed out-of-order completion) or `13` (strictly ordered ascending indices). |
+| `-v`, `--verbose` | Dumps captured `stdout` and `stderr` for failed units to standard error. |
+| `-F`, `--full-dump` | Dumps captured output for succeeded units as well (useful for diagnostic inspection). |
+| `-K`, `--keep` | Retains temporary directories and dumps per-unit channel log files (`<id>-<name>-<channel>.out`). |
+| `-e`, `--bailout` | Aborts execution on the first failure or suite error, draining the pool and issuing a `Bail out!`. |
+| `-q`, `--quiet` | Suppresses all standard output and summary messages; reports status strictly via process exit code. |
+| `-T`, `--staging` | Allocates and manages a temporary staging directory in `$TMPDIR` for the test run. |
+| `-h`, `--help` | Displays usage and options help. |
+| `--version` | Prints package version and exits. |
 
-The specified command line arguments which are not recongnized as options (or flags) are considered the tags for selective unit execution. The argument in form of `tag` or `+tag` represents a tag a unit must bear in order to be executed while the opposite `-tag` tag is used to prevent a unit from executing. In other words, for a unit to be executed is should bear at least one `+tag` and should not bear any of `-tag`s from the specified list of command line arguments. The order of tags does not matter. Empty `+` tag list means that all processed units are eligible for execution.
+### Tag Filters
 
-### Test suite processing
+Any positional arguments not recognized as flags are treated as tag filters:
+- `tag` or `+tag`: Unit must match at least one specified inclusion tag to run.
+- `-tag`: Unit bearing this tag will be skipped.
+- If no inclusion tags are specified, all units (except those matching an exclusion tag) are eligible to run.
 
-A single test suite is an ordinary Tcl source file which requires the `testme` package as its very first meaningful command.
-The Testme package is looked up with the standard Tcl [module](https://wiki.tcl-lang.org/page/Tcl+Modules) loading mechanism.
-If a specific Testme source is used to create independent relocatable test suite, the following preamble may be used:
+---
+
+## Test Suite Structure
+
+A test suite is a standard Tcl script that requires `testme` at its preamble:
 
 ```tcl
-tcl::tm::add [file normalize [file join [file dirname [info script]] .. ..]]
+tcl::tm::add [file normalize [file join [file dirname [info script]] ..]]
 package require testme
-```
 
-The above code instructs to search for Testme module in the directory `../..` relative to the directory containing the source file being executed.
-
-The rest of the source is an ordinary Tcl script which can to anything including definitions for the test units to be processed.
-
-#### Test suite lookup recursion
-
-Prior executing custom code following the `testme` package loading command, the Testme searches for nested test suite sources to execute. The nested sources should have the same name as the current source file being executed and reside in its immediate subdirectories thus rigging for the recursive test suite processing. The recursion depth is unlimited by default and user parts of the test suites are processed in the depth first order. For example, prior the toplevel source `test/testme.tcl` the Testme would also execute `test/nested/testme.tcl` if it exists.
-
-The nested suite processing follows a handshake protocol between the driving Testme machinery and the nested suites, which keeps the runs unaffected by stale per-package copies of the modules and breaks the lookup loops on the symlinked directory structures; see HACKING.md for the details.
-
-For each test suite source the current directory is set to the directory containing this source. This way, the user part of the suite always has suite-specific files in the `.` directory, regardless of recursion level. This also means that the suite can always determine the location of the Testme module and set the module location path accordingly in the way shown above.
-
-#### Unit definition
-
-A test unit is created with `testme::unit` command. Unit definition consists of a [dict](https://wiki.tcl-lang.org/page/dict)-like set of options and mandatory code block. A trivial no-op unit is defined as
-
-```tcl
-testme::unit {}
-```
-
-which denotes an auto-named unit bearing no tags attached and has  empty `{}` code block. This unit succeeds when executed.
-
-An example of the full fledged unit follows
-
-```tcl
-testme::unit -name "unit name" -tags {tagA tagB} -input {OK} {
-    puts [dict get $unit -input]
+unit -name "sample-test" -tags {fast smoke} {
+  expr {1 + 1 == 2}
 }
 ```
 
-So far there are two special options, `-name` and `-tags` which are default-initialized to `unit#`  and `{}` if not specified, respectively. The rest of options is passed through of the unit code block.
+### Recursive Suite Discovery & Descent
 
-Within the unit code, the `context` command retrieves the passed options: flat as `[context -xyz]` or nested as `[context -abc -def]`, with missing keys failing the unit. The `unit` dict variable remains available as well.
+When a test suite runs:
+1. **Toplevel Phase**: The script sets up the worker thread pool and execution environment.
+2. **Suite Discovery**: The suite script is executed inside an isolated interpreter box.
+3. **Subdirectory Descent**: Once the suite script finishes submitting units, `testme` searches immediate subdirectories for scripts matching the suite name (or the pattern set via `-S` / `--source`).
+4. **Umbrella Guard**: Any file sourced by a suite during discovery is recorded in an umbrella trail and will not be re-executed, preventing duplicate runs and breaking symlink cycles.
 
-The `-name` option represents the human-readable unit description. The `-tags` option represents a list of tags which are used to determine whether a particular unit is to be processed or skipped.
+During suite execution, the current working directory is temporarily switched to the suite script's directory, ensuring relative file operations resolve locally.
 
-The mandatory code block specifies Tcl code executed with Tcl's [apply](https://wiki.tcl-lang.org/page/apply) command during unit execution phase. As the unit is executed in a pristine environment, its code block might contain proper Tcl script preamble, including loading required packages. The `exit` command is redefined within the unit code to report the process termination attempts, along with the arguments they were made with, as unit failures. The `testme` package itself may also be required from within the unit code; the package presents a different face to every layer it is loaded from, so the unit layer receives only the auxiliary helpers, such as `testme::with`, without the driving machinery.
+---
 
-There are three outcomes of the unit's code block execution:
+## Unit Definitions & Context
 
-- success
-  
-  A successful outcome occurs when the execution passes the code block end without throwing an error or with `return` command without exit code or with exit code`0` (or `ok`).
-
-- failure
-  
-  A failure occurs on any error or `return` with exit code other than `0` (or `ok`). Custom failure may be issued with Tcl's `error "reason"` command.
-
-- skip
-  
-  A skip outcome is flagged with Testme's `skip "reason"` command. *Note that skipping is not considered a failure.*
-
-#### Unit execution
-
-Unit definitions follow the `package require testme` command and are processed sequentially in a separate per test suite source interpreter. Units are then executed in parallel in an unspecified order.
-
-The units are independent from each other in the sense that there is no (predefined) way to pass or preserve information between them.
-
-# Supplementaries
-
-### Buildme
-
-This package is intended to aid in the task of executing external commands from within the unit code blocks. The `buildme` module is to be loaded from the unit's code block as shown in the following example
+Test units are defined using the `unit` command (exported by `::testme` into the global namespace):
 
 ```tcl
-testme::unit {
-    package require buildme
-    buildme::sandbox {
-        buildme::shell "touch .touchme"
-    }
+unit ?-name string? ?-tags list? ?-skip reason? ?-todo reason? ?options? code
+```
+
+### Basic Unit
+
+```tcl
+unit {
+  expr {42}
+}
+```
+Creates an auto-named unit (`unit<id>`) that passes if the code block completes without throwing an error.
+
+### Full-Fledged Unit
+
+```tcl
+unit -name "user-auth" -tags {auth database} -timeout 5 {
+  set origin [unit -origin]
+  set stage  [unit -stage]
+  # test logic
 }
 ```
 
-Here, the `buildme::sandbox` command creates a temporary directory inside the `$TMPDIR` directory, recursively copies the contents of a current directory (that is, the directory containing tes test suite source file being processed) to that newly created directory and executes the specified Tcl code block. Upon completion, is makes an attempt to delete the temporary directory (unless the Testme's `-K` flag is specified). The `TMPDIR` is either Testme-managed (refer to the Testme's `-T` command line flag) or is inherited from the execution environment.
+### Unit Outcomes
 
-In its turn, the `buildme::shell` command executes the specified shell comand using the `$SHELL` program (which is normally a command interpreter, such as Bash) from either unit suite's current directory or the temporary directory set up by the `buildme::sandbox`, if executed from within its code block.
+- **Success**: The code body completes normally, or issues `return` with code `0` / `ok`.
+- **Failure**: Any uncaught error, or `return -code error "message"`.
+- **Skip**: The unit skips itself at runtime using `skip "reason"`. Skipped units do not count as failures.
 
-The very purpose for this command pair is to aid in executing external commands which may produce (loads of) temporary file outputs along the way which should be retained for examination after unit execution and/or for the unit tests which have to be executed from write-protected locations yet needing to generate file outputs.
+### The `unit` Accessor
 
+Inside the unit code block, the `unit` command queries the unit's metadata record:
+- Invoked bare (`[unit]`), it returns the full configuration dictionary.
+- Invoked with keys (`[unit -key]`), it retrieves specific fields:
 
+| Key | Description |
+| :--- | :--- |
+| `[unit -origin]` | Normalized path to the directory containing the source suite script. Read-only fixtures and test scripts reside here. |
+| `[unit -stage]` | Destination staging directory. In inline mode, equals `-origin`. In staged mode (`-T`), points to the managed `$TMPDIR` directory. |
+| `[unit -source]` | Normalized absolute path to the defining suite script file. |
+| `[unit -name]` | Name assigned to the unit. |
+| `[unit -id]` | Sequence ID of the unit in the test plan. |
+| `[unit -tags]` | Normalized list of tags attached to the unit. |
+| `[unit -cleanup]` | Boolean indicating whether temporary test files should be removed (`false` under `-K`). |
+| `[unit -custom]` | Any user-specified option passed during unit submission. |
+
+### Lexical Scoping with `testme::with`
+
+The `testme::with` helper accumulates values into a list variable across nested blocks:
+
+```tcl
+testme::with tags {api} {
+  unit -name "api-ping" -tags $tags { ping }
+
+  testme::with tags {auth v2} {
+    # tags here is: {api auth v2}
+    unit -name "api-login" -tags $tags { login }
+  }
+}
+```
+
+`testme::with` is available both within suite definition scripts and inside unit execution bodies.
+
+### Unit Containment & Isolation
+
+Units execute in independent worker threads:
+- **`exit` Containment**: `exit` is trapped; calling `exit` inside unit code fails that specific unit without stopping the test suite.
+- **`cd` Prevention**: Working directory modifications via `cd` are forbidden inside unit interpreters to prevent multithreaded race conditions. Use staging directories or `buildme::sandbox` instead.
+- **`::env` Isolation**: Each unit runs with a private copy of the environment table; mutations do not leak to other worker threads.
+
+---
+
+## Companion Modules
+
+Companion packages reside in `extra/` and are automatically discovered by `testme` without requiring extra `tcl::tm::path` configuration.
+
+### `buildme` - Sandbox & Shell Execution
+
+The `buildme` package facilitates filesystem staging and shell execution from within unit bodies:
+
+```tcl
+unit -name "compile-project" {
+  package require buildme
+
+  buildme::sandbox {
+    # Creates an isolated temporary directory seeded from [unit -origin]
+    # and sets the sandbox directory as active
+    buildme::shell "make clean && make"
+  }
+}
+```
+
+- **`buildme::sandbox { ... }`**:
+  - Allocates an isolated scratch directory.
+  - Automatically copies fixture files from `[unit -origin]` (or the parent sandbox if nested).
+  - Ensures staged files and directories are writable (even when the source suite is read-only).
+  - Evaluates the enclosed code with `buildme::shell` targeted to the sandbox.
+  - Recursively removes the sandbox on completion (unless `-K` is specified). On Windows, locked files that cannot be immediately deleted are handed off to a background watchdog process.
+- **`buildme::shell $cmd`**:
+  - Executes shell commands within the active sandbox (or `[unit -stage]`).
+  - Automatically selects `$SHELL` (or `cmd.exe` on Windows).
+  - Handles paths containing spaces cleanly across platforms.
+
+### `tapme` - TAP Stream Processor
+
+`extra/tapme-0.tm` provides an internal Tcl TAP parser and reporter capable of consuming and formatting TAP streams from pipelines.
+
+---
+
+## License
+
+Available under the MIT / BSD-style license terms of the project.
 
 **Happy testing & have fun!**
 

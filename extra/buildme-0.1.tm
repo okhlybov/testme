@@ -114,7 +114,7 @@ namespace eval ::buildme {
   }
 
 
-  # Creates a staging directory seeded with the contents of the unit's stage
+  # Creates a staging directory seeded with the contents of the unit's origin
   # (the directory of the suite defining the unit), evaluates the code with
   # the staging directory in effect for the subsequent buildme commands,
   # then removes the directory unless the run keeps its garbage (-K)
@@ -123,9 +123,13 @@ namespace eval ::buildme {
     set dir [MakeTempDir]
     set saved $stage
     try {
-      set stageDir [Field -stage]
-      if {$stageDir ne {} && [file isdirectory $stageDir]} {
-        foreach p [lsort -unique [glob -nocomplain -directory $stageDir * .*]] {
+      set seed $stage
+      if {$seed eq {}} {
+        set seed [Field -origin]
+        if {$seed eq {}} { set seed [Field -stage] }
+      }
+      if {$seed ne {} && [file isdirectory $seed]} {
+        foreach p [lsort -unique [glob -nocomplain -directory $seed * .*]] {
           set last [file tail $p]
           if {$last eq "." || $last eq ".."} continue
           catch {file type $p} ftype
