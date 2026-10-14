@@ -268,5 +268,105 @@ unit -name u1 { expr {1} }
   }
 }} $helpers $root]
 
+# The tapme consumer parses flat and streamed TAP output from testme
+unit -name tapme-consumer-flat [list apply {{helpers root sample} {
+  source $helpers
+  package require tapme
+
+  # 1. Parse sample output in flat mode
+  tapme::reset
+  lassign [capture tclsh $sample] code out
+  foreach line [split $out \n] { tapme::line $line }
+  expect sample-expect [expr {[tapme::expect] == 9}]
+  expect sample-count [expr {[tapme::count] == 9}]
+  expect sample-failed [expr {[tapme::failed] == 2}]
+  expect sample-passed [expr {[tapme::passed] == 5}]
+  expect sample-skipped [expr {[tapme::skipped] == 1}]
+  expect sample-todo [expr {[tapme::todo] == 1}]
+  expect sample-not-ok [expr {![tapme::ok]}]
+  expect sample-casualties [expr {[matching [join [tapme::casualties] {, }] {failure}] >= 1}]
+
+  # 2. Pipeline CLI mode: testme piped directly to tapme CLI
+  set tapmeScript [file join $root extra tapme-0.tm]
+  lassign [capture tclsh $sample | tclsh $tapmeScript] cliCode cliOut
+  expect cli-fail-exit [expr {$cliCode == 1}]
+  expect cli-summary-line [expr {[matching $cliOut {^# 9 of 9 tests: 5 passed, 2 failed}] == 1}]
+}} $helpers $root $sample]
+
+# The tapme consumer parses hierarchical TAP 14 subtests from testme (-n)
+unit -name tapme-consumer-nested [list apply {{helpers root sample} {
+  source $helpers
+  package require tapme
+
+  tapme::reset
+  lassign [capture tclsh $sample -n] code out
+  foreach line [split $out \n] { tapme::line $line }
+  # Top-level plan in sample with -n is 1..6
+  expect nested-expect [expr {[tapme::expect] == 6}]
+  expect nested-count [expr {[tapme::count] == 6}]
+  expect nested-failed [expr {[tapme::failed] == 2}]
+  expect nested-passed [expr {[tapme::passed] == 2}]
+  expect nested-skipped [expr {[tapme::skipped] == 1}]
+  expect nested-todo [expr {[tapme::todo] == 1}]
+  # Total leaf count across subtests: 12 tests total
+  expect nested-total-count [expr {[tapme::count yes] == 12}]
+  # No plan mismatch warnings generated
+  expect no-plan-warnings [expr {[matching [join [tapme::warnings] \n] {more than one plan line}] == 0}]
+  expect no-count-warnings [expr {[matching [join [tapme::warnings] \n] {expected \d+ tests but}] == 0}]
+
+  # Pipeline CLI mode with -n
+  set tapmeScript [file join $root extra tapme-0.tm]
+  lassign [capture tclsh $sample -n | tclsh $tapmeScript] cliCode cliOut
+  expect cli-nested-summary [expr {[matching $cliOut {^# 6 of 6 tests: 2 passed, 2 failed}] == 1}]
+  expect cli-nested-marks [expr {[string match {*.*} $cliOut] && [string match {*F*} $cliOut]}]
+}} $helpers $root $sample]
+
+# The tapme consumer handles TAP features: skip-all, bail out, YAML block isolation
+unit -name tapme-consumer-features [list apply {{helpers root} {
+  source $helpers
+  package require tapme
+
+  # 1. Skip-all plan
+  tapme::reset
+  tapme::line {TAP version 14}
+  tapme::line {1..0 # SKIP no units discovered}
+  expect skip-all-expect [expr {[tapme::expect] == 0}]
+  expect skip-all-ok [expr {[tapme::ok]}]
+  expect skip-all-summary [expr {[matching [join [tapme::summary] \n] {^# 0 of 0 tests: skipped \(no units discovered\)$}] == 1}]
+
+  # 2. YAML diagnostic block containing 'not ok' does not trigger false failure
+  tapme::reset
+  tapme::line {TAP version 14}
+  tapme::line {1..1}
+  tapme::line {not ok 1 - test with stack trace}
+  tapme::line {  ---}
+  tapme::line {  message: |}
+  tapme::line {    expected ok 1 but got not ok 1}
+  tapme::line {    1..10}
+  tapme::line {  ...}
+  expect yaml-count [expr {[tapme::count] == 1}]
+  expect yaml-failed [expr {[tapme::failed] == 1}]
+  expect yaml-diagnostics [expr {[dict exists [tapme::diagnostics] 1]}]
+
+  # 3. Bail out pragma
+  tapme::reset
+  tapme::line {TAP version 14}
+  tapme::line {1..5}
+  tapme::line {ok 1 - setup}
+  tapme::line {Bail out! database down}
+  expect bailed [expr {[tapme::bailed] eq {yes}}]
+  expect bailed-not-ok [expr {![tapme::ok]}]
+  expect bailed-summary [expr {[matching [join [tapme::summary] \n] {bailed out \(database down\)}] == 1}]
+
+  # 4. Out-of-range and duplicate test warnings
+  tapme::reset
+  tapme::line {1..2}
+  tapme::line {ok 1 - first}
+  tapme::line {ok 1 - duplicate}
+  tapme::line {ok 5 - out-of-range}
+  expect dup-warning [expr {[matching [join [tapme::warnings] \n] {duplicate test point}] == 1}]
+  expect range-warning [expr {[matching [join [tapme::warnings] \n] {out of range}] == 1}]
+}} $helpers $root]
+
 
 
