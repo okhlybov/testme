@@ -153,3 +153,69 @@ unit -name run-watchdog {
     expect unit-ok [expr {[matching $out {^ok \d+ - run-watchdog$}] == 1}]
   }
 }} $helpers $root]
+
+# buildme sandbox seeds correctly from -origin even when -T staging is active
+unit -name sandbox-staged-run [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list data.txt "staged input\n"]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+
+unit -name run-staged-sandbox {
+  package require buildme
+  buildme::sandbox {
+    set cat \[expr {\$::tcl_platform(platform) eq \"windows\" ? \"type\" : \"cat\"}\]
+    buildme::shell \"\$cat data.txt\"
+  }
+}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl -T -v -F] code out
+    expect clean-exit [expr {$code == 0}]
+    expect unit-ok [expr {[matching $out {^ok \d+ - run-staged-sandbox$}] == 1}]
+    expect cat-output [expr {[string match {*staged input*} $out]}]
+  }
+}} $helpers $root]
+
+# buildme shell functions cleanly when the staging path contains spaces
+unit -name shell-spaces-path [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list data.txt "spaced path content\n"]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+
+unit -name run-spaced-shell {
+  package require buildme
+  set cat \[expr {\$::tcl_platform(platform) eq \"windows\" ? \"type\" : \"cat\"}\]
+  buildme::shell \"\$cat data.txt\"
+}
+"]
+  set spacedDir [file join /tmp "testme spaced path [clock microseconds] [expr {int(rand()*10000)}]-test"]
+  file mkdir $spacedDir
+  try {
+    foreach pair $pairs {
+      lassign $pair p content
+      set f [file join $spacedDir $p]
+      set h [open $f w]
+      try { puts $h $content } finally { close $h }
+    }
+    set savedShell ""
+    set hadShell [info exists ::env(SHELL)]
+    if {$hadShell} {
+      set savedShell $::env(SHELL)
+      unset ::env(SHELL)
+    }
+    try {
+      lassign [capture tclsh $spacedDir/test.tcl -v -F] code out
+      expect clean-exit [expr {$code == 0}]
+      expect unit-ok [expr {[matching $out {^ok \d+ - run-spaced-shell$}] == 1}]
+      expect spaced-output [expr {[string match {*spaced path content*} $out]}]
+    } finally {
+      if {$hadShell} { set ::env(SHELL) $savedShell }
+    }
+  } finally {
+    file delete -force $spacedDir
+  }
+}} $helpers $root]

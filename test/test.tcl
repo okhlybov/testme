@@ -64,6 +64,77 @@ testme::with tags {suite-tag} {
   }
 }} $helpers $root]
 
+# The unit accessor exposes -origin and -stage in inline mode, without -root
+unit -name unit-origin-stage-inline [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+unit -name check-inline {
+  set o \[unit -origin\]
+  set s \[unit -stage\]
+  set src \[unit -source\]
+  if {\$o ne \[file dirname \$src\]} {
+    error \"origin mismatch: \$o vs \[file dirname \$src\]\"
+  }
+  if {\$s ne \$o} {
+    error \"stage mismatch in inline mode: \$s vs \$o\"
+  }
+  if {\[file tail \$src\] ne {test.tcl}} {
+    error \"source mismatch: \$src\"
+  }
+  if {!\[catch {unit -root}\]} {
+    error \"-root should not be present in unit record\"
+  }
+  return 1
+}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect clean-exit [expr {$code == 0}]
+    expect unit-ok [expr {[matching $out {^ok \d+ - check-inline$}] == 1}]
+  }
+}} $helpers $root]
+
+# The unit accessor exposes managed -stage distinct from -origin in staged mode (-T)
+unit -name unit-origin-stage-staged [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+unit -name check-staged {
+  set o \[unit -origin\]
+  set s \[unit -stage\]
+  set src \[unit -source\]
+  if {\$o ne \[file dirname \$src\]} {
+    error \"origin mismatch: \$o vs \[file dirname \$src\]\"
+  }
+  if {\$s eq \$o} {
+    error \"stage should differ from origin in staged mode: \$s\"
+  }
+  if {!\[file isdirectory \$s\]} {
+    error \"stage is not a directory: \$s\"
+  }
+  set scratch \[file join \$s staged-marker.txt\]
+  set f \[open \$scratch w\]
+  puts \$f {staged content}
+  close \$f
+  if {!\[file exists \$scratch\]} {
+    error \"failed to write marker in stage\"
+  }
+  if {\[file exists \[file join \$o staged-marker.txt\]\]} {
+    error \"staged file leaked into origin\"
+  }
+  return 1
+}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl -T] code out
+    expect clean-exit [expr {$code == 0}]
+    expect unit-ok [expr {[matching $out {^ok \d+ - check-staged$}] == 1}]
+  }
+}} $helpers $root]
+
 # The --version answer leaves before any machinery starts
 unit -name version [list apply {{helpers sample} {
   source $helpers

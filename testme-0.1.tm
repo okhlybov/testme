@@ -467,6 +467,7 @@ if {$context eq {toplevel}} {
     variable where
     variable version
     variable cleanup
+    variable stage
     set name {}; set skip {}; set todo {}
     if {[dict exists $opts -name]} { set name [dict get $opts -name] }
     if {[dict exists $opts -skip]} { set skip [dict get $opts -skip] }
@@ -490,10 +491,14 @@ if {$context eq {toplevel}} {
     }
     # The unit record: the user options pass through verbatim,
     # the framework fields complete the picture for the unit code
+    set sourceDir [dict get $where $box]
+    set originDir [file dirname [file normalize $sourceDir]]
+    set stageDir [expr {$stage ne {false} ? $stage : $originDir}]
     set record [dict merge $opts [dict create \
       -name $name -tags $tags -code $code -id $index \
-      -source [dict get $where $box] \
-      -stage [pwd] \
+      -source $sourceDir \
+      -origin $originDir \
+      -stage $stageDir \
       -cleanup $cleanup \
     ]]
     set suitePaths {}
@@ -528,7 +533,7 @@ if {$context eq {toplevel}} {
   # Create an isolated suite interpreter over $root and run the script there;
   # the unit submissions arrive synchronously through the alias.
   # The current directory of the suite is its own directory (the boxes and the driver
-  # share the thread's one), so the units inherit a meaningful staging directory
+  # share the thread's one), so the units inherit a meaningful origin directory
   proc Box {root {scriptName {}} {tmpaths {}}} {
     variable Context
     variable boxes
@@ -843,12 +848,14 @@ if {$context eq {toplevel}} {
   proc Teardown {} {
     variable boxes
     variable pool
+    variable staging
     variable stage
+    variable origin
     variable cleanup
     variable verbose
     foreach box $boxes { catch {interp delete $box} }
     tpool::release $pool
-    if {$stage ne {false} && $cleanup} {
+    if {$staging && $stage ne {false} && $cleanup && $stage ne [pwd] && $stage ne $origin} {
       MakeWritable $stage
       if {[catch {file delete -force -- $stage}]} {
         if {$verbose} {puts stderr "failed to remove temporary directory $stage, spawning watchdog"}
