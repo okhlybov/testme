@@ -109,6 +109,9 @@ package require buildme
 
 unit -name run-watchdog {
   package require buildme
+  if {\$::tcl_platform(platform) ne \"windows\" && !\[catch {exec id -u} uid\] && \[string trim \$uid\] == 0} {
+    skip {root deletes read-only directories, the fixture cannot fail}
+  }
   set target \[buildme::MakeTempDir\]
   set sub \[file join \$target locked\]
   file mkdir \$sub
@@ -150,7 +153,7 @@ unit -name run-watchdog {
   withfixture $pairs {
     lassign [capture tclsh $dir/test.tcl] code out
     expect clean-exit [expr {$code == 0}]
-    expect unit-ok [expr {[matching $out {^ok \d+ - run-watchdog$}] == 1}]
+    expect unit-ok [expr {[matching $out {^ok \d+ - run-watchdog( # SKIP.*)?$}] == 1}]
   }
 }} $helpers $root]
 
@@ -192,7 +195,7 @@ unit -name run-spaced-shell {
   buildme::shell \"\$cat data.txt\"
 }
 "]
-  set spacedDir [file join /tmp "testme spaced path [clock microseconds] [expr {int(rand()*10000)}]-test"]
+  set spacedDir [file join [tmproot] "testme spaced path [clock microseconds] [expr {int(rand()*10000)}]-test"]
   file mkdir $spacedDir
   try {
     foreach pair $pairs {
@@ -217,5 +220,133 @@ unit -name run-spaced-shell {
     }
   } finally {
     file delete -force $spacedDir
+  }
+}} $helpers $root]
+
+# The shell of the day ($SHELL) is ignored: commands run under /bin/sh
+unit -name shell-default-sh [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+unit -name run-default-sh {
+  package require buildme
+  buildme::shell {echo shell-ok}
+}
+"]
+  withfixture $pairs {
+    lassign [capture env SHELL=/bin/false tclsh $dir/test.tcl -v -F] code out
+    expect clean-exit [expr {$code == 0}]
+    expect unit-ok [expr {[matching $out {^ok \d+ - run-default-sh$}] == 1}]
+    expect shell-ran [expr {[string match {*shell-ok*} $out]}]
+  }
+}} $helpers $root]
+
+# BUILDME_SHELL overrides the default shell
+unit -name shell-override [list apply {{helpers root} {
+  source $helpers
+  if {[auto_execok bash] eq {}} {
+    skip {bash is unavailable}
+  }
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+unit -name run-bash {
+  package require buildme
+  buildme::shell {echo bash=\$\{BASH_VERSION:-none\}}
+}
+"]
+  withfixture $pairs {
+    lassign [capture env BUILDME_SHELL=bash tclsh $dir/test.tcl -v -F] code out
+    expect clean-exit [expr {$code == 0}]
+    expect bash-ran [expr {[string match {*bash=*[0-9]*} $out] && ![string match {*bash=none*} $out]}]
+  }
+}} $helpers $root]
+
+# Hostile characters in the staging path survive the shell quoting
+unit -name shell-quote-hostile [list apply {{helpers root} {
+  source $helpers
+  set hostile [file join [tmproot] "hostile \$dollar 'quote' [clock microseconds]-test"]
+  file mkdir $hostile
+  try {
+    set f [open [file join $hostile test.tcl] w]
+    puts $f "tcl::tm::add $root
+package require testme
+unit -name hostile-path {
+  package require buildme
+  buildme::shell {pwd}
+  buildme::shell {echo survived}
+}
+"
+    close $f
+    lassign [capture tclsh [file join $hostile test.tcl] -v -F] code out
+    expect clean-exit [expr {$code == 0}]
+    expect unit-ok [expr {[matching $out {^ok \d+ - hostile-path$}] == 1}]
+    expect survived [expr {[string match {*survived*} $out]}]
+  } finally {
+    file delete -force $hostile
+  }
+}} $helpers $root]
+
+# -timeout aborts a stuck command and kills its whole process tree
+unit -name shell-timeout [list apply {{helpers root} {
+  source $helpers
+  if {$::tcl_platform(platform) eq "windows"} {
+    skip {POSIX process groups needed}
+  }
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+unit -name stuck {
+  package require buildme
+  buildme::shell -timeout 1 {sleep 987654 & sleep 987655}
+}
+"]
+  withfixture $pairs {
+    set t0 [clock milliseconds]
+    lassign [capture tclsh $dir/test.tcl] code out
+    set dt [expr {[clock milliseconds] - $t0}]
+    expect failed [expr {$code == 1}]
+    expect unit-failed [expr {[matching $out {^not ok \d+ - stuck$}] == 1}]
+    expect timed-out [expr {[matching $out {command timed out after 1 s}] == 1}]
+    expect prompt [expr {$dt < 8000}]
+    # the whole tree must be gone
+    set gone 0
+    for {set i 0} {$i < 20} {incr i} {
+      if {[catch {exec pgrep -f 98765}]} {
+        set gone 1
+        break
+      }
+      after 200
+    }
+    expect tree-killed [expr {$gone == 1}]
+  }
+}} $helpers $root]
+
+# A unit time limit reaps the children of a buildme::shell stuck in a read
+unit -name shell-unit-timeout-kills [list apply {{helpers root} {
+  source $helpers
+  if {$::tcl_platform(platform) eq "windows"} {
+    skip {POSIX process groups needed}
+  }
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+unit -name stuck -timeout 1 {
+  package require buildme
+  buildme::shell {sleep 987656}
+}
+unit -name witness {
+  after 3000
+  if {![catch {exec pgrep -f 987656} found]} {
+    error \"leftover processes: \$found\"
+  }
+}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect failed [expr {$code == 1}]
+    expect timed-out [expr {[matching $out {^not ok \d+ - stuck$}] == 1 && [matching $out {timed out after 1 s}] == 1}]
+    expect children-reaped [expr {[matching $out {^ok \d+ - witness$}] == 1}]
   }
 }} $helpers $root]

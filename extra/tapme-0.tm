@@ -333,14 +333,28 @@ namespace eval ::tapme {
         }
         dict set scope seen $number 1
       }
-      set hash [string first {#} $rest]
+      # Find the first unescaped '#': producers escape hashes in descriptions
+      # (a lone backslash before it is itself escaped as a double backslash)
+      set directive {}
+      set hash -1
+      for {set k 0} {$k < [string length $rest]} {incr k} {
+        set ch [string index $rest $k]
+        if {$ch eq "\\"} { incr k ; continue }
+        if {$ch eq "#"} { set hash $k ; break }
+      }
       if {$hash >= 0} {
         set directive [string trim [string range $rest [expr {$hash + 1}] end]]
-        set rest [string trim [string range $rest 0 [expr {$hash - 1}]]]
+        set rest [string range $rest 0 [expr {$hash - 1}]]
       }
-      regsub {^-\s*} $rest {} rest
-      set name [string trim $rest]
-      set kind [string toupper [lindex $directive 0]]
+      regsub {^-\s*} [string trim $rest] {} rest
+      set name [string map [list \\# # \\\\ \\] [string trim $rest]]
+      # The directive keyword without list parsing: the reason text may hold
+      # unbalanced braces or quotes; SKIP/TODO match case-insensitively,
+      # prefix spellings (SKIPPED:, skip:) included
+      set kind {}
+      if {[regexp -nocase -- {^(skip|todo)\S*(?:\s+(.*))?$} $directive -> kind]} {
+        set kind [string toupper $kind]
+      }
       set tag $number
       if {$tag eq {}} { set tag $curCount }
       set last_tag $tag

@@ -93,6 +93,7 @@ if {$context eq {toplevel}} {
   # the units carrying the tag, -tag deselects them; -- ends the options
   # so the filters may look like ones
   variable jobs 0
+  variable timeout 0
   variable source_name {}
   variable include [list]
   variable exclude [list]
@@ -102,6 +103,7 @@ if {$context eq {toplevel}} {
       {{--jobs= -j=} -info "set maximum number of parallel units" -default 0 -slot jobs}
       {{-S= --source=} -info "set suite script name to discover during descent" -default {} -slot source_name}
       {{--tap=} -info "emit the TAP version: 14 (streamed) or 13 (strictly ordered)" -default 14 -slot tap}
+      {{--timeout=} -info "set the default unit timeout in seconds (0 = none)" -default 0 -slot timeout}
       {{-n --nested} -info "emit nested TAP 14 subtests" -default true -slot nested}
       {{-s --serial} -info "run units sequentially without thread pool" -default true -slot serial}
       {{-v --verbose} -info "dump unit output to standard error channel" -default true -slot verbose}
@@ -139,6 +141,9 @@ if {$context eq {toplevel}} {
       }
       if {$tap != 0 && $tap != 13 && $tap != 14} {
         error "testme: invalid TESTME_OPTS: unsupported TAP version: $tap"
+      }
+      if {![string is double -strict $timeout] || $timeout < 0} {
+        error "testme: invalid TESTME_OPTS: invalid timeout: $timeout"
       }
       set filters $envFilters
     }
@@ -182,6 +187,10 @@ if {$context eq {toplevel}} {
   if {$tap == 0} { set tap 14 }
   if {$tap != 13 && $tap != 14} {
     puts stderr "testme: unsupported TAP version: $tap"
+    exit 1
+  }
+  if {![string is double -strict $timeout] || $timeout < 0} {
+    puts stderr "testme: invalid timeout: $timeout"
     exit 1
   }
   if {$tap != 14} { set nested false }
@@ -342,13 +351,11 @@ if {$context eq {toplevel}} {
   }
 
   # Idle workers must exist up front: pools relying on lazy worker spawning
-  # were observed to dispatch queued jobs one at a time, defeating parallelism
+  # were observed to dispatch queued jobs one at a time, defeating parallelism.
+  # The pool itself is created once the worker script is defined below: the
+  # -initcmd ships it into every worker thread once, so the jobs stay small
   variable cores 1
   variable pool {}
-  if {!$serial} {
-    set cores [expr {$jobs > 0 ? $jobs : [CoreCount]}]
-    set pool [tpool::create -minworkers $cores -maxworkers $cores]
-  }
   variable pending [dict create]
   variable serialQueue [list]
   variable boxes [list]
@@ -380,9 +387,13 @@ if {$context eq {toplevel}} {
   variable unitOutcome [dict create]
   variable scopeFailed [dict create]
   variable nextTop 1
-
-  # Enter submit phase: the units accumulate while the suite tree is being discovered
-  if {!$serial} { tpool::suspend $pool }
+  # Auto-named subtests draw from their own counter: sharing the unit counter
+  # would punch holes into the flat roster (a number announced, never run)
+  variable nsubtests 0
+  # One environment snapshot taken after discovery serves every unit
+  variable envSnapshot {}
+  # The pending tail of the discovery comment transform
+  variable commentTail {}
 
   # Seed the context for rerunning this very script as a nested suite
   set script [expr {$source_name ne {} ? $source_name : [file tail $::argv0]}]
@@ -392,63 +403,140 @@ if {$context eq {toplevel}} {
      tcl::tm::path [tcl::tm::path list] \
   ]
 
-  # The worker-side unit runner: a self-contained apply so the worker thread needs no setup.
-  # The unit code runs in a clean interpreter whose stdout and stderr are captured
-  # (the TAP stream stays pure), which is destroyed right after.
-  # The unit record is exposed to the code through the read-only unit accessor:
-  # bare invocation returns the whole record, arguments form a chained dict get
-  variable worker {{unit paths version} {
-    # Preserve the real puts for the pass-through channels
-    if {![llength [info commands ::tcl::puts]]} {
-      catch {interp alias {} ::tcl::puts {} ::puts}
+  # The stream redirection containment: a copy of this script is installed
+  # into every interpreter running suite or unit code (and spliced into the
+  # worker below). Redirections aimed at the process output streams are
+  # rewritten into temporary files routed back through the channel stack
+  # (the capture or the comment transform sitting there), so no external
+  # program can write into the middle of the TAP stream; every other form
+  # reaches the real exec verbatim
+  variable ExecWrap {
+    if {[llength [info commands ::testme::RealExec]] == 0} {
+      rename exec ::testme::RealExec
     }
-    set ::stdout [list]
-    set ::stderr [list]
-    array set ::partial {stdout 0 stderr 0}
-    set ::skipped 0
-    set ::skip_reason {}
-
-    proc Puts {args} {
-      set xargs $args
-      set newline 1
-      if {[llength $args] > 1 && [lindex $args 0] eq {-nonewline}} {
-        set args [lrange $args 1 end]
-        set newline 0
+    set ::testme::execTmp [dict create]
+    proc ::testme::TempOf {chan} {
+      if {![dict exists $::testme::execTmp $chan]} {
+        set f [file tempfile path]
+        close $f
+        dict set ::testme::execTmp $chan $path
       }
-      if {[llength $args] == 1} {
-        set chan stdout
-        set text [lindex $args 0]
-      } elseif {[llength $args] == 2} {
-        lassign $args chan text
-      } else {
-        tailcall ::tcl::puts {*}$xargs
-      }
-      if {$chan eq {stdout} || $chan eq {stderr}} {
-        set lines [split $text \n]
-        set first [lindex $lines 0]
-        set rest [lrange $lines 1 end]
-        if {$::partial($chan) && [llength [set ::$chan]] > 0} {
-          lset ::$chan end "[lindex [set ::$chan] end]$first"
-        } else {
-          lappend ::$chan $first
+      return [dict get $::testme::execTmp $chan]
+    }
+    proc exec {args} {
+      set argv $args
+      set background [expr {[lindex $argv end] eq "&"}]
+      if {$background} {set argv [lrange $argv 0 end-1]}
+      set rewritten {}
+      set touched 0
+      set n [llength $argv]
+      for {set i 0} {$i < $n} {incr i} {
+        set w [lindex $argv $i]
+        set op {}
+        set chan {}
+        if {[regexp {^(2>@|>&@|>@)(stdout|stderr)$} $w -> op chan]} {
+          set op [string range $op 0 end-1]
+        } elseif {($w eq {>@} || $w eq {2>@} || $w eq {>&@})
+                  && [lindex $argv [expr {$i + 1}]] in {stdout stderr}} {
+          set chan [lindex $argv [expr {$i + 1}]]
+          set op [string range $w 0 end-1]
+          incr i
         }
-        foreach line $rest { lappend ::$chan $line }
-        set ::partial($chan) [expr {!$newline}]
-      } else {
-        ::tcl::puts {*}$xargs
+        if {$chan ne {}} {
+          if {$background} {
+            return -code error "testme: redirection to the process $chan stream is unsupported for background commands"
+          }
+          lappend rewritten "$op[::testme::TempOf $chan]"
+          set touched 1
+        } else {
+          lappend rewritten $w
+        }
       }
+      if {$background} {lappend rewritten &}
+      if {!$touched} {
+        tailcall ::testme::RealExec {*}$rewritten
+      }
+      set rc [catch {::testme::RealExec {*}$rewritten} res opts]
+      foreach {chan path} $::testme::execTmp {
+        # the copy goes through the channel stack, landing in the capture
+        # (units) or the comment transform (suites) like any other write
+        catch {
+          set f [open $path rb]
+          try {
+            set data [read $f]
+            puts -nonewline $chan [encoding convertfrom [chan configure $chan -encoding] $data]
+          } finally {
+            close $f
+          }
+        }
+        catch {file delete -force -- $path}
+      }
+      set ::testme::execTmp [dict create]
+      return {*}$opts $res
     }
-    proc Skip {{reason {}}} {
+  }
+
+  # The worker-side unit runner. The pool -initcmd installs it once per worker
+  # thread (the serial mode installs the same body under the driver namespace),
+  # so the jobs carry only the unit record instead of the whole runner script.
+  # The unit code runs in a clean interpreter destroyed right after; its
+  # channel output is captured by transforms pushed onto this thread's own
+  # standard channels (every thread owns a separate set, keeping the TAP
+  # stream on the main thread pure). The unit record is exposed to the code
+  # through the read-only unit accessor: bare invocation returns the whole
+  # record, arguments form a chained dict get
+  variable worker [list {unit paths version {envSnapshot {}} {defTimeout 0}} [string map \
+    [list @EXECWRAP@ $ExecWrap] {
+    # One environment snapshot taken after discovery serves every unit:
+    # rebuilding ::env reads it under a global lock, serializing the workers
+    if {$envSnapshot eq {}} {
+      if {[llength [info commands tsv::get]]} {
+        catch {set envSnapshot [tsv::get ::testme env]}
+      }
+      if {$envSnapshot eq {}} {set envSnapshot [array get ::env]}
+    }
+    # The helper procs carry absolute names: the body runs unchanged in the
+    # worker threads (installed at their global level) and in the serial
+    # main interpreter (installed under the driver namespace)
+    proc ::Capture {chan cmd handle args} {
+      switch -- $cmd {
+        initialize {return {initialize finalize write}}
+        write {append ::captured($chan) [lindex $args 0]}
+        default {}
+      }
+      return {}
+    }
+    proc ::Skip {{reason {}}} {
       set ::skipped 1
       set ::skip_reason $reason
       return -code 1073741823 -level 0 $reason
     }
-    proc Context {args} {
+    proc ::Context {args} {
       if {![llength $args]} {return $::record}
       tailcall dict get $::record {*}$args
     }
+    proc ::RegisterPids {pids} {
+      foreach pid $pids {lappend ::childpids $pid}
+    }
+    proc ::UnregisterPids {pids} {
+      set ::childpids [lsearch -all -inline -not -exact $::childpids {*}$pids]
+    }
+    # Reaps the children a unit left behind: a timed out unit cannot clean up
+    # after itself, its interpreter refuses every further evaluation
+    proc ::ReapChildren {} {
+      foreach pid $::childpids {
+        if {$::tcl_platform(platform) eq "windows"} {
+          catch {exec taskkill /PID $pid /T /F}
+        } elseif {[catch {exec kill -9 -- -$pid}]} {
+          catch {exec kill -9 -- $pid}
+        }
+      }
+      set ::childpids {}
+    }
     set ::record $unit
-    set envSnapshot [array get ::env]
+    set ::skipped 0
+    set ::skip_reason {}
+    set ::childpids {}
     set u [interp create]
     try {
       # Isolate ::env so the unit operates on a private copy without mutating the process-wide environment
@@ -483,46 +571,87 @@ if {$context eq {toplevel}} {
       }]
       interp eval $u {namespace eval ::testme {namespace export with}}
       interp alias $u ::skip {} ::Skip
+      # The child processes started by the unit (buildme etc.) register here,
+      # so the worker can reap them once the unit is over, whatever happened
+      interp alias $u ::testme::RegisterPids {} ::RegisterPids
+      interp alias $u ::testme::UnregisterPids {} ::UnregisterPids
       # Unit code must not terminate the process; the attempt is reported as a failure
       interp eval $u {proc exit {args} {return -code error "the unit code requested to terminate the process: exit $args"}}
       # Unit code must not change working directory (process-wide in multithreaded runner); use buildme instead
       interp eval $u {proc cd {args} {return -code error "the unit code must not change working directory: use buildme instead"}}
-      # The output capture: stdout and stderr are tallied, other channels pass through
-      interp alias $u ::CapturePuts {} ::Puts
-      interp eval $u {
-        rename puts ::tcl::puts
-        proc puts {args} {
-          set xargs $args
-          if {[llength $args] > 1 && [lindex $args 0] eq {-nonewline}} {
-            set rest [lrange $args 1 end]
-          } else {
-            set rest $args
-          }
-          set chan [expr {[llength $rest] == 1 ? "stdout" : [lindex $rest 0]}]
-          if {$chan eq {stdout} || $chan eq {stderr}} {
-            CapturePuts {*}$xargs
-          } else {
-            ::tcl::puts {*}$xargs
-          }
+      # The stream redirection containment for the programs the unit launches
+      interp eval $u {@EXECWRAP@}
+      # The unit body runs as a named procedure: the failure traces then end
+      # at a recognizable boundary instead of exposing the runner machinery
+      interp eval $u [list proc ::testme::UnitBody {} [dict get $unit -code]]
+      # The optional unit time limit; a limit spent leaves the interpreter
+      # refusing every further evaluation, so nothing may follow the body in it
+      set limit 0
+      if {[dict exists $unit -timeout]} {set limit [dict get $unit -timeout]}
+      if {$limit <= 0 && $defTimeout > 0} {set limit $defTimeout}
+      if {$limit > 0} {
+        set deadline [expr {[clock milliseconds] + int($limit * 1000)}]
+        interp limit $u time -seconds [expr {$deadline / 1000}] \
+          -milliseconds [expr {$deadline % 1000}] -granularity 1
+      }
+      # The channel capture around the run: puts, chan puts and fcopy alike
+      foreach ch {stdout stderr} {
+        set ::captured($ch) {}
+        set ::capenc($ch) [chan configure $ch -encoding]
+        chan push $ch [list ::Capture $ch]
+      }
+      try {
+        set code [catch {interp eval $u ::testme::UnitBody} result options]
+      } finally {
+        foreach ch {stdout stderr} {
+          catch {flush $ch}
+          catch {chan pop $ch}
         }
       }
-      set code [catch {interp eval $u [list apply [list {} [dict get $unit -code]]]} result options]
     } finally {
       catch {interp delete $u}
+      catch {ReapChildren}
     }
     if {$code == 1073741823 || $::skipped} {
       set status skipped
       if {$code != 1073741823} { set result $::skip_reason }
     } elseif {$code == 0} {
       set status ok
+    } elseif {$code == 1 && [dict exists $options -errorcode]
+              && [lrange [dict get $options -errorcode] 0 2] eq {TCL LIMIT TIME}} {
+      set status timeout
+      set result "timed out after $limit s"
     } else {
       set status error
     }
-    set out $::stdout
-    set err $::stderr
-    catch {unset -nocomplain ::stdout ::stderr ::partial ::skipped ::skip_reason ::record}
+    # Decode the captured bytes into the reported line lists
+    set out {}
+    set err {}
+    foreach {ch var} {stdout out stderr err} {
+      set data [set ::captured($ch)]
+      if {$data eq {}} {continue}
+      set text [encoding convertfrom $::capenc($ch) $data]
+      if {[string index $text end] eq "\n"} {set text [string range $text 0 end-1]}
+      set $var [split $text \n]
+    }
+    catch {unset -nocomplain ::captured ::capenc ::skipped ::skip_reason ::record ::childpids}
     list $status $result $options $out $err
-  }}
+  }]]
+
+  # Ship the runner into its hosting interpreters: the worker threads receive
+  # it through the pool -initcmd once per thread, the serial mode installs the
+  # same body under the driver namespace (the parallel jobs refer to the plain
+  # global ::RunUnit inside their own threads)
+  lassign $worker runnerArgs runnerBody
+  if {!$serial} {
+    set cores [expr {$jobs > 0 ? $jobs : [CoreCount]}]
+    set pool [tpool::create -minworkers $cores -maxworkers $cores \
+      -initcmd [list proc ::RunUnit $runnerArgs $runnerBody]]
+    # Enter submit phase: the units accumulate while the suite tree is being discovered
+    tpool::suspend $pool
+  } else {
+    proc RunUnit $runnerArgs $runnerBody
+  }
   # The shared elements of two lists
   proc Intersect {a b} {
     set r {}
@@ -574,12 +703,12 @@ if {$context eq {toplevel}} {
     variable boxScope
     variable boxScopeStack
     variable scopes
-    variable index
+    variable nsubtests
     set name {}
     if {[dict exists $opts -name]} { set name [dict get $opts -name] }
     if {$name eq {}} {
-      incr index
-      set name "subtest$index"
+      incr nsubtests
+      set name "subtest$nsubtests"
     }
     set currentScope 0
     if {[dict exists $boxScope $box]} {
@@ -614,7 +743,6 @@ if {$context eq {toplevel}} {
   proc Submit {box opts code} {
     variable pool
     variable pending
-    variable worker
     variable index
     variable units
     variable include
@@ -629,6 +757,7 @@ if {$context eq {toplevel}} {
     variable boxScope
     variable scopes
     variable unitScope
+    variable timeout
     set name {}; set skip {}; set todo {}
     if {[dict exists $opts -name]} { set name [dict get $opts -name] }
     if {[dict exists $opts -skip]} { set skip [dict get $opts -skip] }
@@ -672,6 +801,13 @@ if {$context eq {toplevel}} {
       Deliver $index ok {} {} {} {}
       return $index
     }
+    # The unit timeout, when given, must be a positive number; an invalid one
+    # fails the unit at once so the mistake surfaces immediately
+    if {[dict exists $opts -timeout]
+        && (![string is double -strict [dict get $opts -timeout]] || [dict get $opts -timeout] <= 0)} {
+      Deliver $index error "invalid -timeout: [dict get $opts -timeout]" {} {} {}
+      return $index
+    }
     # The unit record: the user options pass through verbatim,
     # the framework fields complete the picture for the unit code
     set sourceDir [dict get $where $box]
@@ -690,7 +826,9 @@ if {$context eq {toplevel}} {
     if {$serial} {
       lappend serialQueue [list $index $record $suitePaths $version]
     } else {
-      set job [tpool::post -nowait $pool [list apply $worker $record $suitePaths $version]]
+      # The empty snapshot argument makes the worker read the shared one
+      # taken after discovery; the default timeout rides along per job
+      set job [tpool::post -nowait $pool [list ::RunUnit $record $suitePaths $version {} $timeout]]
       dict set pending $job $index
     }
     return $index
@@ -784,6 +922,8 @@ if {$context eq {toplevel}} {
         $box eval {catch {namespace import ::testme::unit ::testme::subtest}}
         # Suite code must not terminate the process either
         $box eval {proc exit {args} {return -code error "the suite code requested to terminate the process: exit $args"}}
+        # The stream redirection containment for the programs the suite launches
+        $box eval $::testme::ExecWrap
         # The accumulator shared by the suite layer
         $box eval [list proc ::testme::with {var list code} {
           upvar 1 $var v
@@ -807,9 +947,17 @@ if {$context eq {toplevel}} {
         }
         # Run the suite script from its own directory; the submissions post
         # to the suspended pool right away. The absolute path keeps [info script]
-        # absolute inside the suite, so the suites derive stable paths
+        # absolute inside the suite, so the suites derive stable paths.
+        # Whatever the script prints while being collected becomes a TAP
+        # comment: lines like "ok 1" or "Bail out!" printed here would
+        # otherwise be consumed as test results of this very run
         $box eval [list cd $root]
-        $box eval [list source $script]
+        CommentOn
+        try {
+          $box eval [list source $script]
+        } finally {
+          CommentOff
+        }
       } err opts]} {
         incr failed
         if {!$quiet || $verbose} { puts stderr "testme: suite script $script failed: $err" }
@@ -878,6 +1026,76 @@ if {$context eq {toplevel}} {
     string map [list \r\n " " \n " " \r " "] $text
   }
 
+  # Escapes a test point description: an unescaped backslash or hash would
+  # leak into the TAP syntax (a hash starts a directive, so a failing unit
+  # named "x # TODO y" would read as an expected failure to every consumer)
+  proc TapDescription {text} {
+    string map [list \\ \\\\ # \\# \r\n " " \n " " \r " "] $text
+  }
+
+  # Trims a failure trace at the unit body boundary: the frames below belong
+  # to the runner machinery, not the unit; -F/--full-dump keeps them for
+  # debugging the framework itself
+  proc TrimTrace {trace name} {
+    variable full
+    if {$full} {return $trace}
+    set out {}
+    foreach line [split $trace \n] {
+      if {[regexp {^\s*\(procedure "::testme::UnitBody" line (\d+)\)} $line -> n]} {
+        lappend out "    (unit \"[CleanTapLine $name]\" line $n)"
+        return [join $out \n]
+      }
+      lappend out $line
+    }
+    return [join $out \n]
+  }
+
+  # The discovery output containment: everything a suite script prints while
+  # being collected flows through a transform turning each line into a TAP
+  # comment, so no stray (or forged) text can precede the plan as results.
+  # The payload is handled as raw bytes (the transform sits below the
+  # encoding layer); the inserted prefixes are plain ASCII, which keeps any
+  # output encoding intact
+  proc CommentStream {chan cmd handle args} {
+    variable quiet
+    variable commentTail
+    switch -- $cmd {
+      initialize {
+        set commentTail {}
+        return {initialize finalize write}
+      }
+      write {
+        if {$quiet} {return {}}
+        set buf $commentTail[encoding convertfrom iso8859-1 [lindex $args 0]]
+        set out {}
+        while {[set nl [string first \n $buf]] >= 0} {
+          append out "# " [string range $buf 0 $nl]
+          set buf [string range $buf [expr {$nl + 1}] end]
+        }
+        set commentTail $buf
+        return [encoding convertto iso8859-1 $out]
+      }
+      default {}
+    }
+  }
+
+  proc CommentOn {} {
+    variable commentTail
+    set commentTail {}
+    catch {chan push stdout [list ::testme::CommentStream stdout]}
+  }
+
+  proc CommentOff {} {
+    variable commentTail
+    variable quiet
+    catch {chan pop stdout}
+    if {$commentTail ne {} && !$quiet} {
+      # a trailing partial line still deserves its comment marker
+      catch {puts stdout [encoding convertto iso8859-1 "# $commentTail"]}
+    }
+    set commentTail {}
+  }
+
   # Print a single TAP test line with its directives and, for a failure, a YAML diagnostic;
   # dump the captured unit channels under -v/-F and log them into per-unit files under -K
   proc Emit {id status result options stdout stderr} {
@@ -890,7 +1108,7 @@ if {$context eq {toplevel}} {
     variable stage
     variable origin
     lassign [dict get $units $id] name skip todo
-    set name [CleanTapLine $name]
+    set name [TapDescription $name]
     set skip [CleanTapLine $skip]
     set todo [CleanTapLine $todo]
     if {$skip ne {}} {
@@ -907,12 +1125,20 @@ if {$context eq {toplevel}} {
       # The unit skipped itself at run time
       incr passed
       Say "ok $id - $name # SKIP [CleanTapLine $result]"
+    } elseif {$status eq {timeout}} {
+      # A TODO unit that timed out is still an expected failure
+      if {$todo eq {}} { incr failed }
+      Say "not ok $id - $name$directive"
+      Say {  ---}
+      Say {  message: |}
+      foreach line [split [CleanTapLine $result] \n] { Say "    $line" }
+      Say {  ...}
     } else {
       # A TODO failure is an expected one: reported, but not counted against the verdict
       if {$todo eq {}} { incr failed }
       Say "not ok $id - $name$directive"
       if {[dict exists $options -errorinfo]} {
-        set message [dict get $options -errorinfo]
+        set message [TrimTrace [dict get $options -errorinfo] $name]
       } elseif {$result ne {}} {
         set message $result
       } else {
@@ -960,9 +1186,10 @@ if {$context eq {toplevel}} {
   proc FormatUnitLine {depth localId id} {
     variable units
     variable unitOutcome
+    variable full
     set indent [string repeat " " [expr {$depth * 4}]]
     lassign [dict get $units $id] name skip todo
-    set name [CleanTapLine $name]
+    set name [TapDescription $name]
     set skip [CleanTapLine $skip]
     set todo [CleanTapLine $todo]
     set lines [list]
@@ -977,10 +1204,18 @@ if {$context eq {toplevel}} {
       lappend lines "${indent}ok $localId - $name$directive"
     } elseif {$status eq {skipped}} {
       lappend lines "${indent}ok $localId - $name # SKIP [CleanTapLine $result]"
+    } elseif {$status eq {timeout}} {
+      lappend lines "${indent}not ok $localId - $name$directive"
+      lappend lines "${indent}  ---"
+      lappend lines "${indent}  message: |"
+      foreach mline [split [CleanTapLine $result] \n] {
+        lappend lines "${indent}    $mline"
+      }
+      lappend lines "${indent}  ..."
     } else {
       lappend lines "${indent}not ok $localId - $name$directive"
       if {[dict exists $options -errorinfo]} {
-        set message [dict get $options -errorinfo]
+        set message [TrimTrace [dict get $options -errorinfo] $name]
       } elseif {$result ne {}} {
         set message $result
       } else {
@@ -1002,7 +1237,7 @@ if {$context eq {toplevel}} {
     variable scopes
     variable scopeFailed
     set depth [dict get $scopes $s depth]
-    set name [dict get $scopes $s name]
+    set name [CleanTapLine [dict get $scopes $s name]]
     set items [dict get $scopes $s items]
     set indent [string repeat " " [expr {$depth * 4}]]
     set parentIndent [string repeat " " [expr {($depth - 1) * 4}]]
@@ -1030,7 +1265,7 @@ if {$context eq {toplevel}} {
         if {[dict exists $scopeFailed $id] && [dict get $scopeFailed $id]} {
           set childFailed 1
         }
-        set childName [CleanTapLine [dict get $scopes $id name]]
+        set childName [TapDescription [dict get $scopes $id name]]
         set childSkip [CleanTapLine [dict get $scopes $id skip]]
         set childTodo [CleanTapLine [dict get $scopes $id todo]]
         if {$childSkip ne {}} {
@@ -1077,7 +1312,7 @@ if {$context eq {toplevel}} {
         if {[dict exists $scopeFailed $id] && [dict get $scopeFailed $id]} {
           set childFailed 1
         }
-        set childName [CleanTapLine [dict get $scopes $id name]]
+        set childName [TapDescription [dict get $scopes $id name]]
         set childSkip [CleanTapLine [dict get $scopes $id skip]]
         set childTodo [CleanTapLine [dict get $scopes $id todo]]
         if {$childSkip ne {}} {
@@ -1350,7 +1585,14 @@ if {$context eq {toplevel}} {
 
   # Enter execute phase: drain the pool reporting the outcomes as they come.
   # The submission phase is over, so the pending set only shrinks.
-  # The outcomes stashed during discovery (skipped units, failed suites) join the stream now
+  # The outcomes stashed during discovery (skipped units, failed suites) join the stream now.
+  # One environment snapshot serves the whole run: taken here, after discovery,
+  # it still carries whatever the suites adjusted in ::env while they were
+  # collected, while saving every worker the lock-guarded ::env rebuild
+  set envSnapshot [array get ::env]
+  if {!$serial} {
+    catch {tsv::set ::testme env $envSnapshot}
+  }
   set streaming 1
   if {$nested} {
     FlushNested
@@ -1367,7 +1609,7 @@ if {$context eq {toplevel}} {
     foreach item $serialQueue {
       if {$doomed} { break }
       lassign $item id record paths ver
-      if {[catch {apply $worker $record $paths $ver} outcome]} {
+      if {[catch {RunUnit $record $paths $ver $envSnapshot $timeout} outcome]} {
         set outcome [list error $outcome {} {} {}]
       }
       if {$doomed} { continue }

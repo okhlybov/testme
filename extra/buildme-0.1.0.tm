@@ -157,26 +157,127 @@ namespace eval ::buildme {
   }
 
 
-  proc shell {cmd} {
+  # Escapes a path for the POSIX single quoting: an embedded quote closes
+  # the string, escapes itself and reopens it
+  proc shellquote {path} {
+    regsub -all {'} $path {'\\''} path
+    return "'$path'"
+  }
+
+
+  # The best effort process tree termination: the shell runs in a session of
+  # its own whenever setsid exists, so the whole tree shares the process
+  # group of the root pid; elsewhere (or on Windows) the pid itself is the
+  # best available target
+  proc KillTree {pids} {
+    foreach pid $pids {
+      if {$::tcl_platform(platform) eq "windows"} {
+        catch {exec taskkill /PID $pid /T /F}
+      } elseif {[catch {exec kill -TERM -- -$pid}]} {
+        catch {exec kill -TERM -- $pid}
+      }
+    }
+  }
+
+
+  # Executes a shell command in the active sandbox (or [unit -stage]).
+  # The shell is /bin/sh (or %COMSPEC% on Windows) unless BUILDME_SHELL
+  # or the -shell option says otherwise; $SHELL is deliberately ignored:
+  # an interactive shell of the day is no foundation for tests.
+  # The output is returned (and echoed to the unit channels); a non-zero
+  # exit raises an error carrying the output; -timeout aborts and kills
+  # the whole command tree
+  proc shell {args} {
     variable stage
     if {$stage eq {}} { set stage [Field -stage] }
-    set sh "/bin/sh"
-    set flag "-c"
-    if {[info exists ::env(SHELL)] && $::env(SHELL) ne {}} {
-      set sh $::env(SHELL)
-    } elseif {$::tcl_platform(platform) eq "windows"} {
-      set sh [expr {[info exists ::env(COMSPEC)] ? $::env(COMSPEC) : "cmd.exe"}]
-      set flag "/c"
+    set timeout 0
+    set shprog {}
+    while {[llength $args] > 1} {
+      set a [lindex $args 0]
+      if {$a eq {-timeout} || $a eq {-shell}} {
+        if {[llength $args] < 3} {
+          error "usage: buildme::shell ?-timeout seconds? ?-shell program? ?--? command"
+        }
+        if {$a eq {-timeout}} {
+          set timeout [lindex $args 1]
+        } else {
+          set shprog [lindex $args 1]
+        }
+        set args [lrange $args 2 end]
+      } elseif {$a eq {--}} {
+        set args [lrange $args 1 end]
+        break
+      } else {
+        break
+      }
     }
-    set nativeStage [file nativename $stage]
-    set cd [expr {$flag eq "/c" ? "cd /d $nativeStage" : "cd \"$stage\""}]
-    puts stdout "$cd && \\\n$cmd"
-    if {[catch {exec -ignorestderr $sh $flag "$cd && $cmd" 2>@1} result opts]} {
-      puts stderr $result
+    if {[llength $args] != 1} {
+      error "usage: buildme::shell ?-timeout seconds? ?-shell program? ?--? command"
+    }
+    set cmd [lindex $args 0]
+    if {$shprog eq {}} {
+      if {[info exists ::env(BUILDME_SHELL)] && $::env(BUILDME_SHELL) ne {}} {
+        set shprog $::env(BUILDME_SHELL)
+      } elseif {$::tcl_platform(platform) eq "windows"} {
+        set shprog [expr {[info exists ::env(COMSPEC)] ? $::env(COMSPEC) : "cmd.exe"}]
+      } else {
+        set shprog /bin/sh
+      }
+    }
+    # cmd.exe takes /c and cd /d; every sh flavor takes -c
+    set cmdlike [string match cmd* [string tolower [file tail $shprog]]]
+    if {$cmdlike} {
+      set flag /c
+      # Windows paths cannot carry the double quote, so the quoting is safe
+      set script "cd /d [file nativename $stage] && $cmd"
     } else {
-      puts stdout $result
+      set flag -c
+      set script "cd [shellquote $stage] && $cmd"
     }
-    return {*}$opts $result
+    # A session of its own keeps the whole command tree killable as a group
+    set launcher {}
+    if {!$cmdlike && ![catch {auto_execok setsid} bin] && $bin ne {}} {
+      set launcher $bin
+    }
+    set words [list $shprog $flag $script]
+    if {$launcher ne {}} {
+      set words [linsert $words 0 $launcher]
+    }
+    lappend words 2>@1
+    set chan [open |$words r]
+    fconfigure $chan -blocking 0
+    set pids [pid $chan]
+    catch {::testme::RegisterPids $pids}
+    set out {}
+    set timedout 0
+    set deadline [expr {$timeout > 0 ? [clock milliseconds] + int($timeout * 1000) : 0}]
+    while {1} {
+      append out [read $chan]
+      if {[eof $chan]} {break}
+      if {$deadline && [clock milliseconds] >= $deadline} {
+        set timedout 1
+        break
+      }
+      after 20
+    }
+    if {$timedout} {
+      KillTree $pids
+      catch {::testme::UnregisterPids $pids}
+      catch {close $chan}
+      error "buildme: command timed out after $timeout s; partial output:\n$out"
+    }
+    # A blocking close waits for the child and reports its exit status;
+    # a non-blocking one would silently discard it
+    fconfigure $chan -blocking 1
+    set rc [catch {close $chan} cerr copts]
+    catch {::testme::UnregisterPids $pids}
+    set out [string trimright $out \n]
+    if {$rc} {
+      puts stderr $out
+      return {*}$copts $out
+    }
+    puts stdout $out
+    return {*}$copts $out
   }
 
 

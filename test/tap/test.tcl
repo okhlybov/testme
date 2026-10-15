@@ -370,3 +370,79 @@ unit -name tapme-consumer-features [list apply {{helpers root} {
 
 
 
+
+# Descriptions carrying hashes or backslashes cannot forge TAP directives
+unit -name tap-escaping [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+unit -name {issue #42} {expr {1}}
+unit -name {x # TODO evil} {error {boom}}
+unit -name {a\\b} {expr {1}}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect hash-escaped [expr {[matching $out {^ok \d+ - issue \\#42$}] == 1}]
+    expect todo-lookalike-escaped [expr {[matching $out {^not ok \d+ - x \\# TODO evil$}] == 1}]
+    expect todo-lookalike-counts-failed [expr {[matching $out {^testme: 2 passed, 1 failed$}] == 1}]
+    expect backslash-escaped [expr {[matching $out {^ok \d+ - a\\\\b$}] == 1}]
+    expect failed-exit [expr {$code == 1}]
+    # the escaping must not deceive the bundled consumer either
+    package require tapme
+    tapme::reset
+    foreach line [split $out \n] {tapme::line $line}
+    expect consumer-counts-failure [expr {[tapme::failed] == 1}]
+    expect consumer-no-fake-todo [expr {[tapme::todo] == 0}]
+  }
+}} $helpers $root]
+
+# A TODO-looking directive reason with hostile characters must not crash tapme
+unit -name tapme-directive-robustness [list apply {{helpers root} {
+  source $helpers
+  package require tapme
+  set lines [list \
+    "TAP version 14" \
+    "1..7" \
+    "ok 1 - x # SKIP not \{done" \
+    "ok 2 - y # TODO \"half" \
+    "not ok 3 - issue \\#42" \
+    "ok 4 - a # SKIP: no db" \
+    "ok 5 - b # skipped: away" \
+    "ok 6 - plain" \
+    "not ok 7 - c"]
+  tapme::reset
+  foreach line $lines {tapme::line $line}
+  expect no-crash [expr {[tapme::count] == 7}]
+  expect unbalanced-brace-reason [expr {[tapme::skipped] == 3}]
+  expect unbalanced-quote-reason [expr {[tapme::todo] == 1}]
+  expect colon-skip-form [expr {[tapme::skipped] == 3}]
+  expect escaped-hash-name [expr {[lindex [tapme::casualties] 0] eq {3 - issue #42}}]
+  expect failures [expr {[tapme::failed] == 2}]
+  expect not-ok [expr {![tapme::ok]}]
+}} $helpers $root]
+
+# An auto-named subtest in flat mode must not punch a hole into the roster
+unit -name flat-subtest-no-gap [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+unit -name first {expr {1}}
+subtest {
+  unit -name inner-a {expr {1}}
+  unit -name inner-b {expr {1}}
+}
+unit -name last {expr {1}}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect clean-exit [expr {$code == 0}]
+    expect plan-honest [expr {[matching $out {^1\.\.4$}] == 1}]
+    expect no-gap [expr {[matching $out {^ok [1234] - (first|inner-a|inner-b|last)$}] == 4}]
+    package require tapme
+    tapme::reset
+    foreach line [split $out \n] {tapme::line $line}
+    expect consumer-sees-all [expr {[tapme::count] == 4 && [tapme::ok]}]
+  }
+}} $helpers $root]

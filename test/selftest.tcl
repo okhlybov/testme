@@ -1,6 +1,25 @@
 # Self test helpers: the unit codes source this file inside their clean interpreters
 
 
+# True when running as root on a POSIX system: root can delete read-only
+# trees, which defeats the permission-based failure fixtures
+proc isroot {} {
+  expr {$::tcl_platform(platform) ne "windows"
+        && ![catch {exec id -u} uid] && [string trim $uid] == 0}
+}
+
+
+# A writable scratch root: the platform temp directory before the /tmp fallback
+proc tmproot {} {
+  foreach var {TMPDIR TEMP TMP} {
+    if {[info exists ::env($var)] && [file isdirectory $::env($var)]} {
+      return $::env($var)
+    }
+  }
+  return /tmp
+}
+
+
 # Runs a command capturing the exit status together with the merged output
 proc capture {args} {
   if {[catch {exec {*}$args 2>@1} out]} {
@@ -27,7 +46,7 @@ proc matching {out pattern} {
 proc withfixture {pairs body} {
   upvar 1 dir dir
   # The name must not collide across the worker threads (pid is process wide)
-  set dir [file join /tmp testme-selftest-[pid]-[clock microseconds]-[expr {int(rand()*1000000)}]]
+  set dir [file join [tmproot] testme-selftest-[pid]-[clock microseconds]-[expr {int(rand()*1000000)}]]
   file mkdir $dir
   foreach pair $pairs {
     lassign $pair path content

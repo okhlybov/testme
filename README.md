@@ -1,16 +1,17 @@
 # testme - a Tcl testing pico framework
 
-Testme is an agentic-ready, high-performance testing framework for the [Tcl](https://www.tcl-lang.org/) language (compatible with Tcl 8.6+ and Tcl 9.0+).
+Testme is a compact testing framework for the [Tcl](https://www.tcl-lang.org/) language (compatible with Tcl 8.6+ and Tcl 9.0+) built around three ideas: every unit runs in a pristine interpreter of its own, suites are discovered recursively, and the reported [TAP](https://testanything.org/) stream is guarded so unit and suite output cannot corrupt it.
 
 ## Features
 
-- **Parallel Unit Execution**: High-throughput execution across multi-core systems using native OS thread pools (`Thread` package).
-- **TAP 14 & TAP 13 Compliance**: Streams real-time [TAP](https://testanything.org/) 14 results as tests complete, with strict ascending TAP 13 fallback.
+- **Parallel Unit Execution**: Units run across native OS thread pools (`Thread` package) with per-unit interpreter isolation; `-s` degrades to serial execution when threads are unavailable.
+- **TAP 14 & TAP 13 Compliance**: Streams real-time TAP 14 results as tests complete, with strict ascending TAP 13 fallback; test point descriptions escape `\` and `#`, so arbitrary unit names cannot forge directives.
 - **Hierarchical Subtests**: Emits standard indented TAP 14 subtests for discovered sub-suites and in-suite `subtest` blocks under `-n` / `--nested`.
-- **Unit Tagging & Filtering**: Granular test selection via command-line tag inclusions (`+tag` / `tag`) and exclusions (`-tag`).
+- **Unit Tagging & Filtering**: Granular test selection via command-line tag inclusions (`+tag` / `tag`) and exclusions (`-tag` after `--`).
 - **Lexical Scoping with `testme::with`**: Scoped tag and parameter accumulation across nested blocks at both suite and unit levels.
 - **Strict Execution Containment**: Units run in isolated interpreter threads with private `::env` environments; unsafe calls like `exit` and `cd` are intercepted and reported as failures without destabilizing the runner.
-- **Output Channel Capture**: `stdout` and `stderr` channels are buffered per unit, preserving a clean TAP stream on standard output.
+- **Unit Timeouts**: `-timeout N` (or a run-wide `--timeout=N` default) stops runaway unit code with `interp limit` and reports `timed out after N s`.
+- **Output Channel Capture**: Everything a unit writes to `stdout` / `stderr` through Tcl channels (`puts`, `chan puts`, `fcopy`, and `exec` redirections like `>@ stdout`) is buffered per unit, preserving a clean TAP stream; suite output during discovery becomes TAP comments.
 - **Inline & Staged Execution Modes**: Explicit separation between `-origin` (read-only source directory where suite fixtures reside) and `-stage` (destination directory where files are copied or created).
 - **Extensible Companions**: Automatic module resolution for companion libraries in `extra/` (such as `buildme` for filesystem sandboxing and shell execution).
 
@@ -18,8 +19,7 @@ Testme is an agentic-ready, high-performance testing framework for the [Tcl](htt
 
 ## Prerequisites
 
-- **Tcl 8.6+** or **Tcl 9.0+**
-- **Thread package** (standard in active Tcl installations)
+- **Tcl 8.6+** (with **Thread 2.8+**) or **Tcl 9.0+** (with **Thread 3.0+**)
 - *(Optional)* POSIX shell environment for the included [`tapview`](https://gitlab.com/esr/tapview) viewer, or Tcl for the pure-Tcl `extra/tapme-0.tm` consumer.
 
 ---
@@ -77,6 +77,7 @@ usage: tclsh suite.tcl [options] [--] [+tag ...] [-tag ...] [tag ...]
 | `-j=`, `--jobs=` | Maximum number of parallel worker threads. Defaults to detected system CPU cores. |
 | `-S=`, `--source=` | Suite script filename to discover during subdirectory descent (defaults to script name of `$::argv0`). |
 | `--tap=` | TAP protocol dialect: `14` (default, streamed out-of-order completion) or `13` (strictly ordered ascending indices). |
+| `--timeout=` | Default unit timeout in seconds (`0` = none). Units carrying their own `-timeout` override it. Fractional values are allowed. |
 | `-n`, `--nested` | Emits hierarchical TAP 14 indented subtests (for discovered sub-suites and in-suite subtests). Off by default; disabled in TAP 13 mode. |
 | `-s`, `--serial` | Runs units sequentially without a thread pool (disabling `tpool`). Degrades to serial mode automatically if the `Thread` package is not available. |
 | `-v`, `--verbose` | Dumps captured `stdout` and `stderr` for failed units to standard error. |
@@ -84,7 +85,7 @@ usage: tclsh suite.tcl [options] [--] [+tag ...] [-tag ...] [tag ...]
 | `-K`, `--keep` | Retains temporary directories and dumps per-unit channel log files (`<id>-<name>-<channel>.out`). |
 | `-e`, `--bailout` | Aborts execution on the first failure or suite error, draining the pool and issuing a `Bail out!`. |
 | `-q`, `--quiet` | Suppresses all standard output and summary messages; reports status strictly via process exit code. |
-| `-T`, `--staging` | Allocates and manages a temporary staging directory in `$TMPDIR` for the test run. |
+| `-T`, `--staging` | Allocates and manages a temporary staging directory in `$TMPDIR` for the test run. Note: the staging directory is shared by all units of the run; use `buildme::sandbox` for per-unit scratch trees. |
 | `-h`, `--help` | Displays usage and options help. |
 | `--version` | Prints package version and exits. |
 
@@ -112,6 +113,12 @@ Any positional arguments not recognized as flags are treated as tag filters:
 - `-tag`: Unit bearing this tag will be skipped.
 - If no inclusion tags are specified, all units (except those matching an exclusion tag) are eligible to run.
 
+Exclusion filters start with `-`, so they must follow the `--` terminator to avoid being read as options:
+
+```shell
+tclsh suite.tcl -- -slow
+```
+
 ---
 
 ## Test Suite Structure
@@ -135,7 +142,7 @@ When a test suite runs:
 3. **Subdirectory Descent**: Once the suite script finishes submitting units, `testme` searches immediate subdirectories for scripts matching the suite name (or the pattern set via `-S` / `--source`).
 4. **Umbrella Guard**: Any file sourced by a suite during discovery is recorded in an umbrella trail and will not be re-executed, preventing duplicate runs and breaking symlink cycles.
 
-During suite execution, the current working directory is temporarily switched to the suite script's directory, ensuring relative file operations resolve locally.
+During suite execution, the current working directory is temporarily switched to the suite script's directory, ensuring relative file operations in the suite script itself resolve locally. While units run, the current directory is the directory the run was started from (all threads of a process share one working directory), so unit code must build paths from `[unit -origin]` / `[unit -stage]` instead of relative names.
 
 ### Subtests & Hierarchical Nesting
 
@@ -183,6 +190,12 @@ unit -name "user-auth" -tags {auth database} -timeout 5 {
 }
 ```
 
+### Unit Timeouts
+
+`-timeout N` (seconds, fractional values allowed) stops unit code that runs too long via an interpreter time limit: the unit is reported as failed with `timed out after N s`. A TODO unit that times out remains an expected failure. `--timeout=N` sets a default for units without their own `-timeout`; an invalid `-timeout` value fails the unit immediately instead of running it.
+
+The limit stops Tcl code (busy loops, `after` waits). A unit blocked in an external program is reaped when the limit fires (its child processes are killed by the worker), but the unit itself cannot run cleanup code afterwards.
+
 ### Unit Outcomes
 
 - **Success**: The code body completes normally, or issues `return` with code `0` / `ok`.
@@ -228,7 +241,11 @@ testme::with tags {api} {
 Units execute in independent worker threads:
 - **`exit` Containment**: `exit` is trapped; calling `exit` inside unit code fails that specific unit without stopping the test suite.
 - **`cd` Prevention**: Working directory modifications via `cd` are forbidden inside unit interpreters to prevent multithreaded race conditions. Use staging directories or `buildme::sandbox` instead.
-- **`::env` Isolation**: Each unit runs with a private copy of the environment table; mutations do not leak to other worker threads.
+- **`::env` Isolation**: Each unit runs with a private copy of the environment table taken after discovery; mutations do not leak to other units — and they are also *not* passed to programs the unit starts with `exec` (children inherit the process environment of the run, not the unit's modifications). Pass values to child programs explicitly, as arguments or via `buildme::shell`.
+- **Output Capture**: Everything the unit writes to `stdout` / `stderr` through Tcl channels — `puts`, `chan puts`, `fcopy`, and `exec` redirections such as `>@ stdout` or `2>@ stderr` — is buffered per unit and reported under `-v` / `-F` / `-K`. Redirecting the process streams of *background* commands (`exec cmd >@ stdout &`) is rejected with an error, since there is no completion point to collect from; a child process writing to inherited standard error through `open |cmd` is not captured.
+- **Failure Traces**: Failure diagnostics end at the unit body boundary (`(unit "name" line N)`); the full framework-level trace is kept under `-F`.
+
+Environment adjustments made by suite scripts *while they are being collected* do reach the units.
 
 ---
 
@@ -258,20 +275,31 @@ unit -name "compile-project" {
   - Ensures staged files and directories are writable (even when the source suite is read-only).
   - Evaluates the enclosed code with `buildme::shell` targeted to the sandbox.
   - Recursively removes the sandbox on completion (unless `-K` is specified). On Windows, locked files that cannot be immediately deleted are handed off to a background watchdog process.
-- **`buildme::shell $cmd`**:
-  - Executes shell commands within the active sandbox (or `[unit -stage]`).
-  - Automatically selects `$SHELL` (or `cmd.exe` on Windows).
-  - Handles paths containing spaces cleanly across platforms.
+- **`buildme::shell ?-timeout seconds? ?-shell program? ?--? command`**:
+  - Executes a shell command within the active sandbox (or `[unit -stage]`) and returns (and echoes to the unit channels) its combined output; a non-zero exit raises an error carrying the output.
+  - Uses `/bin/sh -c` on POSIX and `%COMSPEC% /c` on Windows by default. `$SHELL` is deliberately ignored; set `BUILDME_SHELL` or pass `-shell` to override.
+  - Paths are quoted safely: single-quote escaping on POSIX, `cd /d` on Windows.
+  - `-timeout seconds` aborts a stuck command and kills its whole process tree (best effort: process groups under `setsid` on Linux, `taskkill /T` on Windows); the error message carries the partial output. Children of a `buildme::shell` call are also reaped when the unit itself times out.
 
 ### `tapme` - TAP Stream Processor
 
-`extra/tapme-0.tm` provides an internal Tcl TAP parser and reporter capable of consuming and formatting TAP streams from pipelines.
+`extra/tapme-0.tm` provides an internal Tcl TAP parser and reporter capable of consuming and formatting TAP streams from pipelines. It understands escaped `\#` in descriptions, tolerates hostile characters in directive reasons, and recognizes `SKIP`/`TODO` spellings like `# SKIP: reason` or `# skipped: no db`.
 
----
+### `xyz` - Build Flavor Helper (example)
+
+`extra/xyz-0.tm` is a sample companion used by the framework author's own numerics testing: it derives BLAS-flavor tags (`-xyz dto`) and descriptive names for `unit` submissions, demonstrating how custom pass-through options extend the unit record.
+
+## Performance
+
+Isolation is the design center, not raw trivial-unit throughput: every unit gets a fresh interpreter. Expect roughly **3 ms per trivial unit** (about 2.8 µs of which is Tcl itself — compare `tcltest` running the same trivial tests in one interpreter at ~40 µs each), amortized across workers in the parallel mode. The per-unit cost is independent of environment size.
+
+Measured with `sh bench/run.sh 500` on 8 cores (Tcl 8.6.16, Linux): 500 trivial units — 0.47 s parallel / 1.52 s serial; with 200 extra environment variables — 0.54 s / 1.62 s (no environment-size penalty); 100 subprocess-running units — 0.16 s parallel. Run `bench/run.sh` yourself to reproduce on your hardware.
 
 ## License
 
-Available under the MIT / BSD-style license terms of the project.
+BSD 3-Clause License (see [LICENSE](LICENSE)). The bundled `tapview` viewer is © Eric S. Raymond, MIT-0 (see its header).
+
+---
 
 **Happy testing & have fun!**
 

@@ -141,3 +141,32 @@ unit -name version [list apply {{helpers sample} {
   lassign [capture tclsh $sample --version] code out
   expect printed [expr {$code == 0 && [string trim $out] eq {0.1}}]
 }} $helpers $sample]
+
+# Environment adjustments made by suites while collected reach the units
+# (the one snapshot is taken after discovery, not before it)
+unit -name env-suite-change-reaches-units [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+set ::env(TOP_VAR) top-value
+package require testme
+unit -name top-envy {
+  if {\$::env(TOP_VAR) ne {top-value}} {error {top var missing}}
+}
+"]
+  lappend pairs [list {sub test.tcl} "package require testme
+set ::env(SUB_VAR) sub-value
+unit -name sub-envy {
+  if {\$::env(SUB_VAR) ne {sub-value}} {error {sub var missing}}
+}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect clean-exit [expr {$code == 0}]
+    expect top-var [expr {[matching $out {^ok \d+ - top-envy$}] == 1}]
+    expect sub-var [expr {[matching $out {^ok \d+ - sub-envy$}] == 1}]
+    lassign [capture tclsh $dir/test.tcl -s] code2 out2
+    expect serial-top-var [expr {$code2 == 0 && [matching $out2 {top-envy$}] == 1}]
+    expect serial-sub-var [expr {[matching $out2 {sub-envy$}] == 1}]
+  }
+}} $helpers $root]
