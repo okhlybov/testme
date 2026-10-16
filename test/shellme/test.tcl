@@ -4,7 +4,7 @@ set here [file dirname [info script]]
 set root [file normalize $here/../..]
 set helpers [file join [file dirname $here] selftest.tcl]
 
-# buildme sandbox creates a temporary copy of the suite stage and runs commands there
+# The sandbox creates a temporary copy of the unit origin and runs commands there
 unit -name sandbox-basic [list apply {{helpers root} {
   source $helpers
   set pairs [list]
@@ -13,11 +13,11 @@ unit -name sandbox-basic [list apply {{helpers root} {
 package require testme
 
 unit -name run-sandbox {
-  package require buildme
-  buildme::sandbox {
+  package require shellme
+  shellme::sandbox {
     set cat \[expr {\$::tcl_platform(platform) eq \"windows\" ? \"type\" : \"cat\"}\]
-    buildme::shell \"\$cat data.txt\"
-    buildme::shell {echo newoutput > output.txt}
+    shellme::shell \"\$cat data.txt\"
+    shellme::shell {echo newoutput > output.txt}
   }
 }
 "]
@@ -29,7 +29,7 @@ unit -name run-sandbox {
   }
 }} $helpers $root]
 
-# buildme sandbox operates cleanly even when the suite files and directory are read-only
+# The sandbox operates cleanly even when the suite files and directory are read-only
 unit -name sandbox-readonly-source [list apply {{helpers root} {
   source $helpers
   set pairs [list]
@@ -38,14 +38,14 @@ unit -name sandbox-readonly-source [list apply {{helpers root} {
 package require testme
 
 unit -name run-ro {
-  package require buildme
-  buildme::sandbox {
+  package require shellme
+  shellme::sandbox {
     # modify copied file (which would fail if permissions weren't made writable)
     set cat \[expr {\$::tcl_platform(platform) eq \"windows\" ? \"type\" : \"cat\"}\]
-    buildme::shell {echo modified >> readonly.txt}
-    buildme::shell \"\$cat readonly.txt\"
+    shellme::shell {echo modified >> readonly.txt}
+    shellme::shell \"\$cat readonly.txt\"
     # create new file in sandbox
-    buildme::shell {echo created > created.txt}
+    shellme::shell {echo created > created.txt}
   }
 }
 "]
@@ -78,7 +78,7 @@ unit -name run-ro {
   }
 }} $helpers $root]
 
-# buildme shell captures stderr on failure and reports errors
+# The shell captures stderr on failure and reports errors
 unit -name shell-failure [list apply {{helpers root} {
   source $helpers
   set pairs [list]
@@ -86,9 +86,9 @@ unit -name shell-failure [list apply {{helpers root} {
 package require testme
 
 unit -name run-fail {
-  package require buildme
-  buildme::sandbox {
-    buildme::shell {exit 42}
+  package require shellme
+  shellme::sandbox {
+    shellme::shell {exit 42}
   }
 }
 "]
@@ -99,23 +99,23 @@ unit -name run-fail {
   }
 }} $helpers $root]
 
-# buildme watchdog cleans up directories when immediate delete fails
+# The watchdog cleans up directories when immediate delete fails
 unit -name sandbox-watchdog-cleanup [list apply {{helpers root} {
   source $helpers
   set pairs [list]
   lappend pairs [list test.tcl "tcl::tm::add $root
 package require testme
-package require buildme
+package require shellme
 
 unit -name run-watchdog {
-  package require buildme
+  package require shellme
   if {\$::tcl_platform(platform) ne \"windows\" && !\[catch {exec id -u} uid\] && \[string trim \$uid\] == 0} {
     skip {root deletes read-only directories, the fixture cannot fail}
   }
-  set target \[buildme::MakeTempDir\]
+  set target \[shellme::MakeTempDir\]
   set sub \[file join \$target locked\]
   file mkdir \$sub
-  set f \[open \[file join \$sub file.txt\] w\]
+  set f \[open \[file join \$sub file.txt\] w]
   puts \$f {temporary}
   close \$f
   # Make subdirectory unreadable/unwritable on Linux, or hold file open on Windows
@@ -135,7 +135,7 @@ unit -name run-watchdog {
   }
 
   # Spawn watchdog with short timeout
-  buildme::SpawnWatchdog \$target 5
+  shellme::SpawnWatchdog \$target 5
 
   # Poll for up to 3 seconds for watchdog to clean it up
   set deadline \[expr {[clock seconds] + 3}\]
@@ -157,7 +157,7 @@ unit -name run-watchdog {
   }
 }} $helpers $root]
 
-# buildme sandbox seeds correctly from -origin even when -T staging is active
+# The sandbox seeds from the unit origin even when -T staging is active
 unit -name sandbox-staged-run [list apply {{helpers root} {
   source $helpers
   set pairs [list]
@@ -166,10 +166,10 @@ unit -name sandbox-staged-run [list apply {{helpers root} {
 package require testme
 
 unit -name run-staged-sandbox {
-  package require buildme
-  buildme::sandbox {
+  package require shellme
+  shellme::sandbox {
     set cat \[expr {\$::tcl_platform(platform) eq \"windows\" ? \"type\" : \"cat\"}\]
-    buildme::shell \"\$cat data.txt\"
+    shellme::shell \"\$cat data.txt\"
   }
 }
 "]
@@ -181,7 +181,7 @@ unit -name run-staged-sandbox {
   }
 }} $helpers $root]
 
-# buildme shell functions cleanly when the staging path contains spaces
+# The shell works when the staging path contains spaces
 unit -name shell-spaces-path [list apply {{helpers root} {
   source $helpers
   set pairs [list]
@@ -190,9 +190,9 @@ unit -name shell-spaces-path [list apply {{helpers root} {
 package require testme
 
 unit -name run-spaced-shell {
-  package require buildme
+  package require shellme
   set cat \[expr {\$::tcl_platform(platform) eq \"windows\" ? \"type\" : \"cat\"}\]
-  buildme::shell \"\$cat data.txt\"
+  shellme::shell \"\$cat data.txt\"
 }
 "]
   set spacedDir [file join [tmproot] "testme spaced path [clock microseconds] [expr {int(rand()*10000)}]-test"]
@@ -200,24 +200,14 @@ unit -name run-spaced-shell {
   try {
     foreach pair $pairs {
       lassign $pair p content
-      set f [file join $spacedDir $p]
-      set h [open $f w]
+      set f [open [file join $spacedDir $p] w]
+      set h $f
       try { puts $h $content } finally { close $h }
     }
-    set savedShell ""
-    set hadShell [info exists ::env(SHELL)]
-    if {$hadShell} {
-      set savedShell $::env(SHELL)
-      unset ::env(SHELL)
-    }
-    try {
-      lassign [capture tclsh $spacedDir/test.tcl -v -F] code out
-      expect clean-exit [expr {$code == 0}]
-      expect unit-ok [expr {[matching $out {^ok \d+ - run-spaced-shell$}] == 1}]
-      expect spaced-output [expr {[string match {*spaced path content*} $out]}]
-    } finally {
-      if {$hadShell} { set ::env(SHELL) $savedShell }
-    }
+    lassign [capture tclsh $spacedDir/test.tcl -v -F] code out
+    expect clean-exit [expr {$code == 0}]
+    expect unit-ok [expr {[matching $out {^ok \d+ - run-spaced-shell$}] == 1}]
+    expect spaced-output [expr {[string match {*spaced path content*} $out]}]
   } finally {
     file delete -force $spacedDir
   }
@@ -230,8 +220,8 @@ unit -name shell-default-sh [list apply {{helpers root} {
   lappend pairs [list test.tcl "tcl::tm::add $root
 package require testme
 unit -name run-default-sh {
-  package require buildme
-  buildme::shell {echo shell-ok}
+  package require shellme
+  shellme::shell {echo shell-ok}
 }
 "]
   withfixture $pairs {
@@ -242,7 +232,7 @@ unit -name run-default-sh {
   }
 }} $helpers $root]
 
-# BUILDME_SHELL overrides the default shell
+# SHELLME_SHELL overrides the default shell
 unit -name shell-override [list apply {{helpers root} {
   source $helpers
   if {[auto_execok bash] eq {}} {
@@ -252,12 +242,12 @@ unit -name shell-override [list apply {{helpers root} {
   lappend pairs [list test.tcl "tcl::tm::add $root
 package require testme
 unit -name run-bash {
-  package require buildme
-  buildme::shell {echo bash=\$\{BASH_VERSION:-none\}}
+  package require shellme
+  shellme::shell {echo bash=\$\{BASH_VERSION:-none\}}
 }
 "]
   withfixture $pairs {
-    lassign [capture env BUILDME_SHELL=bash tclsh $dir/test.tcl -v -F] code out
+    lassign [capture env SHELLME_SHELL=bash tclsh $dir/test.tcl -v -F] code out
     expect clean-exit [expr {$code == 0}]
     expect bash-ran [expr {[string match {*bash=*[0-9]*} $out] && ![string match {*bash=none*} $out]}]
   }
@@ -273,9 +263,9 @@ unit -name shell-quote-hostile [list apply {{helpers root} {
     puts $f "tcl::tm::add $root
 package require testme
 unit -name hostile-path {
-  package require buildme
-  buildme::shell {pwd}
-  buildme::shell {echo survived}
+  package require shellme
+  shellme::shell {pwd}
+  shellme::shell {echo survived}
 }
 "
     close $f
@@ -298,8 +288,8 @@ unit -name shell-timeout [list apply {{helpers root} {
   lappend pairs [list test.tcl "tcl::tm::add $root
 package require testme
 unit -name stuck {
-  package require buildme
-  buildme::shell -timeout 1 {sleep 987654 & sleep 987655}
+  package require shellme
+  shellme::shell -timeout 1 {sleep 987654 & sleep 987655}
 }
 "]
   withfixture $pairs {
@@ -323,7 +313,7 @@ unit -name stuck {
   }
 }} $helpers $root]
 
-# A unit time limit reaps the children of a buildme::shell stuck in a read
+# A unit time limit reaps the children of a shell stuck in a read
 unit -name shell-unit-timeout-kills [list apply {{helpers root} {
   source $helpers
   if {$::tcl_platform(platform) eq "windows"} {
@@ -333,8 +323,8 @@ unit -name shell-unit-timeout-kills [list apply {{helpers root} {
   lappend pairs [list test.tcl "tcl::tm::add $root
 package require testme
 unit -name stuck -timeout 1 {
-  package require buildme
-  buildme::shell {sleep 987656}
+  package require shellme
+  shellme::shell {sleep 987656}
 }
 unit -name witness {
   after 3000
@@ -348,5 +338,148 @@ unit -name witness {
     expect failed [expr {$code == 1}]
     expect timed-out [expr {[matching $out {^not ok \d+ - stuck$}] == 1 && [matching $out {timed out after 1 s}] == 1}]
     expect children-reaped [expr {[matching $out {^ok \d+ - witness$}] == 1}]
+  }
+}} $helpers $root]
+
+# shellme::unit submits a fully configured unit: seeded staging, shell, capture
+unit -name shellme-unit-basic [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list data.txt "seed content\n"]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+package require shellme
+
+shellme::unit -name build-it -tags {build} {
+  # the staging space is preconfigured: the shell works right away
+  set cat \[expr {\$::tcl_platform(platform) eq \"windows\" ? \"type\" : \"cat\"}\]
+  shellme::shell \"\$cat data.txt\"
+  # and the sandbox is writable immediately
+  set f \[open \[file join \[shellme::stage\] made.txt\] w\]
+  puts \$f made
+  close \$f
+  if {!\[file exists \[file join \[shellme::stage\] data.txt\]\]} {
+    error {the sandbox was not seeded from the origin}
+  }
+}
+unit -name plain {expr {1}}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl -v -F] code out
+    expect clean-exit [expr {$code == 0}]
+    expect unit-ok [expr {[matching $out {^ok \d+ - build-it$}] == 1}]
+    expect seeded [expr {[string match {*seed content*} $out]}]
+    expect origin-clean [expr {![file exists [file join $dir made.txt]]}]
+    expect plain-ok [expr {[matching $out {^ok \d+ - plain$}] == 1}]
+  }
+}} $helpers $root]
+
+# Program I/O redirected onto the process streams is captured in shellme units
+unit -name shellme-unit-exec-capture [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+package require shellme
+
+shellme::unit -name redirects {
+  exec echo EXECOUT-CAPTURED >@ stdout
+  exec sh -c {echo EXECERR-CAPTURED >&2} 2>@ stderr
+}
+"]
+  withfixture $pairs {
+    # plain run: the TAP stream carries none of the program output
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect clean-exit [expr {$code == 0}]
+    expect stream-clean [expr {[matching $out {EXECOUT-CAPTURED|EXECERR-CAPTURED}] == 0}]
+    expect unit-ok [expr {[matching $out {^ok 1 - redirects$}] == 1}]
+    # verbose run: the dump carries all of it
+    lassign [capture tclsh $dir/test.tcl -v -F] code2 out2
+    expect stdout-captured [expr {[matching $out2 {EXECOUT-CAPTURED}] >= 1}]
+    expect stderr-captured [expr {[matching $out2 {EXECERR-CAPTURED}] >= 1}]
+  }
+}} $helpers $root]
+
+# Seeding control: -exclude filters top-level names, -only picks paths
+unit -name shellme-unit-seeding [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list src/a.c "int main(){}\n"]
+  lappend pairs [list Makefile "all:\n"]
+  lappend pairs [list {sub/deep.txt} "deep\n"]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+package require shellme
+
+shellme::unit -name picky -only {src/a.c sub/deep.txt} {
+  if {!\[file exists \[file join \[shellme::stage\] src a.c\]\]} {error {src/a.c missing}}
+  if {!\[file exists \[file join \[shellme::stage\] sub deep.txt\]\]} {error {sub/deep.txt missing}}
+  if {\[file exists \[file join \[shellme::stage\] Makefile\]\]} {error {Makefile should not be copied}}
+}
+shellme::unit -name excluded -exclude {Makefile src} {
+  if {\[file exists \[file join \[shellme::stage\] Makefile\]\]} {error {Makefile should be excluded}}
+  if {\[file exists \[file join \[shellme::stage\] src\]\]} {error {src should be excluded}}
+  if {!\[file exists \[file join \[shellme::stage\] sub\]\]} {error {sub should be copied}}
+}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect clean-exit [expr {$code == 0}]
+    expect picky-ok [expr {[matching $out {^ok \d+ - picky$}] == 1}]
+    expect excluded-ok [expr {[matching $out {^ok \d+ - excluded$}] == 1}]
+  }
+}} $helpers $root]
+
+# A timed out shellme unit leaves neither processes nor sandboxes behind
+unit -name shellme-unit-timeout-cleanup [list apply {{helpers root} {
+  source $helpers
+  if {$::tcl_platform(platform) eq "windows"} {
+    skip {POSIX process groups needed}
+  }
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+package require shellme
+
+shellme::unit -name stuck -timeout 1 {
+  shellme::shell {sleep 987657}
+}
+unit -name witness {
+  after 3000
+  if {![catch {exec pgrep -f {sleep 987657}} found]} {
+    error \"leftover processes: \$found\"
+  }
+  foreach d \[glob -nocomplain -directory \[tmproot\] test.tcl-* test-* shellme* *.tcl-*\] {
+    error \"leftover staging: \$d\"
+  }
+}
+"]  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect failed [expr {$code == 1}]
+    expect timed-out [expr {[matching $out {^not ok \d+ - stuck$}] == 1}]
+    expect children-reaped [expr {[matching $out {^ok \d+ - witness$}] == 1}]
+  }
+}} $helpers $root]
+
+# -staging none skips the sandbox but keeps the program I/O capture
+unit -name shellme-unit-staging-none [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+package require shellme
+
+shellme::unit -name bare -staging none {
+  if {\[shellme::stage\] eq {}} {error {stage should fall back to the unit record}}
+  exec echo BARE-CAPTURED >@ stdout
+}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect clean-exit [expr {$code == 0}]
+    expect unit-ok [expr {[matching $out {^ok 1 - bare$}] == 1}]
+    expect stream-clean [expr {[matching $out {BARE-CAPTURED}] == 0}]
+    lassign [capture tclsh $dir/test.tcl -v -F] code2 out2
+    expect captured [expr {[matching $out2 {BARE-CAPTURED}] >= 1}]
   }
 }} $helpers $root]

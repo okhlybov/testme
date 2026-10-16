@@ -11,9 +11,9 @@ Testme is a compact testing framework for the [Tcl](https://www.tcl-lang.org/) l
 - **Lexical Scoping with `testme::with`**: Scoped tag and parameter accumulation across nested blocks at both suite and unit levels.
 - **Strict Execution Containment**: Units run in isolated interpreter threads with private `::env` environments; unsafe calls like `exit` and `cd` are intercepted and reported as failures without destabilizing the runner.
 - **Unit Timeouts**: `-timeout N` (or a run-wide `--timeout=N` default) stops runaway unit code with `interp limit` and reports `timed out after N s`.
-- **Output Channel Capture**: Everything a unit writes to `stdout` / `stderr` through Tcl channels (`puts`, `chan puts`, `fcopy`, and `exec` redirections like `>@ stdout`) is buffered per unit, preserving a clean TAP stream; suite output during discovery becomes TAP comments.
+- **Output Channel Capture**: Unit writes to `stdout` / `stderr` (`puts`, `chan puts`) are buffered per unit, preserving a clean TAP stream; the I/O escapes the basic capture cannot see (`exec` stream redirections, `fcopy` onto the streams, suite stdout during discovery) are denied with a pointer to `shellme`, which captures program I/O properly.
 - **Inline & Staged Execution Modes**: Explicit separation between `-origin` (read-only source directory where suite fixtures reside) and `-stage` (destination directory where files are copied or created).
-- **Extensible Companions**: Automatic module resolution for companion libraries in `extra/` (such as `buildme` for filesystem sandboxing and shell execution).
+- **Extensible Companions**: Automatic module resolution for `shellme` (the staging/shell/program-I/O module shipped alongside testme) and for optional companion libraries in `extra/`.
 
 ---
 
@@ -85,7 +85,7 @@ usage: tclsh suite.tcl [options] [--] [+tag ...] [-tag ...] [tag ...]
 | `-K`, `--keep` | Retains temporary directories and dumps per-unit channel log files (`<id>-<name>-<channel>.out`). |
 | `-e`, `--bailout` | Aborts execution on the first failure or suite error, draining the pool and issuing a `Bail out!`. |
 | `-q`, `--quiet` | Suppresses all standard output and summary messages; reports status strictly via process exit code. |
-| `-T`, `--staging` | Allocates and manages a temporary staging directory in `$TMPDIR` for the test run. Note: the staging directory is shared by all units of the run; use `buildme::sandbox` for per-unit scratch trees. |
+| `-T`, `--staging` | Allocates and manages a temporary staging directory in `$TMPDIR` for the test run. Note: the staging directory is shared by all units of the run; use `shellme` units for per-unit scratch trees. |
 | `-h`, `--help` | Displays usage and options help. |
 | `--version` | Prints package version and exits. |
 
@@ -238,11 +238,13 @@ testme::with tags {api} {
 
 ### Unit Containment & Isolation
 
-Units execute in independent worker threads:
+Units execute in independent worker threads. The core runner keeps a deliberate divide: what a unit legitimately needs for assertions is **captured**; the I/O escapes that would threaten the TAP stream are **denied** with a pointer to `shellme`, never silently contained.
+
 - **`exit` Containment**: `exit` is trapped; calling `exit` inside unit code fails that specific unit without stopping the test suite.
-- **`cd` Prevention**: Working directory modifications via `cd` are forbidden inside unit interpreters to prevent multithreaded race conditions. Use staging directories or `buildme::sandbox` instead.
-- **`::env` Isolation**: Each unit runs with a private copy of the environment table taken after discovery; mutations do not leak to other units — and they are also *not* passed to programs the unit starts with `exec` (children inherit the process environment of the run, not the unit's modifications). Pass values to child programs explicitly, as arguments or via `buildme::shell`.
-- **Output Capture**: Everything the unit writes to `stdout` / `stderr` through Tcl channels — `puts`, `chan puts`, `fcopy`, and `exec` redirections such as `>@ stdout` or `2>@ stderr` — is buffered per unit and reported under `-v` / `-F` / `-K`. Redirecting the process streams of *background* commands (`exec cmd >@ stdout &`) is rejected with an error, since there is no completion point to collect from; a child process writing to inherited standard error through `open |cmd` is not captured.
+- **`cd` Prevention**: Working directory modifications via `cd` are forbidden inside unit interpreters to prevent multithreaded race conditions. Use staging directories or `shellme::sandbox` instead.
+- **`::env` Isolation**: Each unit runs with a private copy of the environment table taken after discovery; mutations do not leak to other units — and they are also *not* passed to programs the unit starts with `exec` (children inherit the process environment of the run, not the unit's modifications). Pass values to child programs explicitly, as arguments or via `shellme::shell`.
+- **Basic Output Capture**: Everything the unit writes to `stdout` / `stderr` through `puts` or `chan puts` is buffered per unit and reported under `-v` / `-F` / `-K`.
+- **Stream Deny List**: The process output streams belong to the runner's TAP report, so `exec` redirections onto them (`>@ stdout`, `2>@ stderr`, split and glued forms), `fcopy` onto them, and suite `puts` to stdout during discovery are refused with an error naming the alternative (`shellme`). Program I/O belongs to [shellme](#shellme--staging-shell--program-io), which captures it properly.
 - **Failure Traces**: Failure diagnostics end at the unit body boundary (`(unit "name" line N)`); the full framework-level trace is kept under `-F`.
 
 Environment adjustments made by suite scripts *while they are being collected* do reach the units.
@@ -251,35 +253,40 @@ Environment adjustments made by suite scripts *while they are being collected* d
 
 ## Companion Modules
 
-Companion packages reside in `extra/` and are automatically discovered by `testme` without requiring extra `tcl::tm::path` configuration.
+`shellme` ships at the top level next to testme itself (`shellme-0.tm`) and is resolved through the same module path; the optional companions reside in `extra/` and are discovered automatically without extra `tcl::tm::path` configuration.
 
-### `buildme` - Sandbox & Shell Execution
+### `shellme` - Staging, Shell & Program I/O
 
-The `buildme` package facilitates filesystem staging and shell execution from within unit bodies:
+The `shellme` package is the I/O and process-testing half of the framework. Its unit specification preconfigures everything a body needs to work with files and external programs:
 
 ```tcl
-unit -name "compile-project" {
-  package require buildme
+package require testme
+package require shellme
 
-  buildme::sandbox {
-    # Creates an isolated temporary directory seeded from [unit -origin]
-    # and sets the sandbox directory as active
-    buildme::shell "make clean && make"
-  }
+shellme::unit -name "compile-project" -tags {build} -timeout 120 {
+  # the staging sandbox is already created and seeded from the unit origin;
+  # the shell already targets it; program output is already captured
+  shellme::shell {make -j}
+  shellme::shell {./a.out --selftest}
 }
+
+# plain units stay untouched
+unit -name "math" {expr {2 + 2 == 4}}
 ```
 
-- **`buildme::sandbox { ... }`**:
-  - Allocates an isolated scratch directory.
-  - Automatically copies fixture files from `[unit -origin]` (or the parent sandbox if nested).
-  - Ensures staged files and directories are writable (even when the source suite is read-only).
-  - Evaluates the enclosed code with `buildme::shell` targeted to the sandbox.
-  - Recursively removes the sandbox on completion (unless `-K` is specified). On Windows, locked files that cannot be immediately deleted are handed off to a background watchdog process.
-- **`buildme::shell ?-timeout seconds? ?-shell program? ?--? command`**:
+- **`shellme::unit ?options? { code }`** — submits through the ordinary `unit` machinery (`-name`, `-tags`, `-skip`, `-todo`, `-timeout`, `-subtest` and custom pass-through options all work), wrapping the body in:
+  - a per-unit **staging sandbox** seeded from `[unit -origin]`, removed on completion (even when the unit times out, or `-K` retains it);
+  - `shellme::shell` targeting the sandbox;
+  - **program I/O capture**: `exec … >@ stdout` / `2>@ stderr` redirections are rerouted through temporary files and collected into the unit's output report instead of being denied.
+  - Shellme-specific options: `-seed dir` (default `[unit -origin]`), `-exclude {patterns}` (default `{.git .hg .svn CVS _darcs}`), `-only {paths}` (copy just these paths), `-staging auto|none` (skip the sandbox, keep the capture).
+- **`shellme::sandbox ?-seed dir? ?-exclude patterns? ?-only paths? ?--? { code }`** — the staging primitive itself, usable inside plain units; nests (a sandbox inside a sandbox seeds from the parent).
+- **`shellme::shell ?-timeout seconds? ?-shell program? ?--? command`**:
   - Executes a shell command within the active sandbox (or `[unit -stage]`) and returns (and echoes to the unit channels) its combined output; a non-zero exit raises an error carrying the output.
-  - Uses `/bin/sh -c` on POSIX and `%COMSPEC% /c` on Windows by default. `$SHELL` is deliberately ignored; set `BUILDME_SHELL` or pass `-shell` to override.
+  - Uses `/bin/sh -c` on POSIX and `%COMSPEC% /c` on Windows by default. `$SHELL` is deliberately ignored; set `SHELLME_SHELL` or pass `-shell` to override.
   - Paths are quoted safely: single-quote escaping on POSIX, `cd /d` on Windows.
-  - `-timeout seconds` aborts a stuck command and kills its whole process tree (best effort: process groups under `setsid` on Linux, `taskkill /T` on Windows); the error message carries the partial output. Children of a `buildme::shell` call are also reaped when the unit itself times out.
+  - `-timeout seconds` aborts a stuck command and kills its whole process tree (best effort: process groups under `setsid` on Linux, `taskkill /T` on Windows); the error message carries the partial output. Children of a `shellme::shell` call are also reaped when the unit itself times out.
+
+`buildme`, the earlier name of this module, has been removed.
 
 ### `tapme` - TAP Stream Processor
 

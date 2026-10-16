@@ -392,8 +392,6 @@ if {$context eq {toplevel}} {
   variable nsubtests 0
   # One environment snapshot taken after discovery serves every unit
   variable envSnapshot {}
-  # The pending tail of the discovery comment transform
-  variable commentTail {}
 
   # Seed the context for rerunning this very script as a nested suite
   set script [expr {$source_name ne {} ? $source_name : [file tail $::argv0]}]
@@ -403,90 +401,49 @@ if {$context eq {toplevel}} {
      tcl::tm::path [tcl::tm::path list] \
   ]
 
-  # The stream redirection containment: a copy of this script is installed
-  # into every interpreter running suite or unit code (and spliced into the
-  # worker below). Redirections aimed at the process output streams are
-  # rewritten into temporary files routed back through the channel stack
-  # (the capture or the comment transform sitting there), so no external
-  # program can write into the middle of the TAP stream; every other form
-  # reaches the real exec verbatim
-  variable ExecWrap {
+  # The process output streams belong to the runner's TAP report: unit or
+  # suite code (or a program it launches) writing onto them is refused
+  # outright rather than contained - external programs belong to shellme.
+  # A copy of this guard is installed into every interpreter running suite
+  # or unit code (and spliced into the worker below); it scans the exec
+  # arguments for stream redirections and lets everything else through verbatim
+  variable StreamGuard {
     if {[llength [info commands ::testme::RealExec]] == 0} {
       rename exec ::testme::RealExec
-    }
-    set ::testme::execTmp [dict create]
-    proc ::testme::TempOf {chan} {
-      if {![dict exists $::testme::execTmp $chan]} {
-        set f [file tempfile path]
-        close $f
-        dict set ::testme::execTmp $chan $path
-      }
-      return [dict get $::testme::execTmp $chan]
     }
     proc exec {args} {
       set argv $args
       set background [expr {[lindex $argv end] eq "&"}]
       if {$background} {set argv [lrange $argv 0 end-1]}
-      set rewritten {}
-      set touched 0
       set n [llength $argv]
       for {set i 0} {$i < $n} {incr i} {
         set w [lindex $argv $i]
-        set op {}
         set chan {}
-        if {[regexp {^(2>@|>&@|>@)(stdout|stderr)$} $w -> op chan]} {
-          set op [string range $op 0 end-1]
+        if {[regexp {^(?:2>@|>&@|>@)(stdout|stderr)$} $w -> chan]} {
         } elseif {($w eq {>@} || $w eq {2>@} || $w eq {>&@})
                   && [lindex $argv [expr {$i + 1}]] in {stdout stderr}} {
           set chan [lindex $argv [expr {$i + 1}]]
-          set op [string range $w 0 end-1]
-          incr i
         }
         if {$chan ne {}} {
-          if {$background} {
-            return -code error "testme: redirection to the process $chan stream is unsupported for background commands"
-          }
-          lappend rewritten "$op[::testme::TempOf $chan]"
-          set touched 1
-        } else {
-          lappend rewritten $w
+          return -code error "the code must not write to the process streams (redirection to $chan); run external programs through shellme"
         }
       }
-      if {$background} {lappend rewritten &}
-      if {!$touched} {
-        tailcall ::testme::RealExec {*}$rewritten
-      }
-      set rc [catch {::testme::RealExec {*}$rewritten} res opts]
-      foreach {chan path} $::testme::execTmp {
-        # the copy goes through the channel stack, landing in the capture
-        # (units) or the comment transform (suites) like any other write
-        catch {
-          set f [open $path rb]
-          try {
-            set data [read $f]
-            puts -nonewline $chan [encoding convertfrom [chan configure $chan -encoding] $data]
-          } finally {
-            close $f
-          }
-        }
-        catch {file delete -force -- $path}
-      }
-      set ::testme::execTmp [dict create]
-      return {*}$opts $res
+      if {$background} {lappend argv &}
+      tailcall ::testme::RealExec {*}$argv
     }
   }
 
   # The worker-side unit runner. The pool -initcmd installs it once per worker
   # thread (the serial mode installs the same body under the driver namespace),
   # so the jobs carry only the unit record instead of the whole runner script.
-  # The unit code runs in a clean interpreter destroyed right after; its
-  # channel output is captured by transforms pushed onto this thread's own
-  # standard channels (every thread owns a separate set, keeping the TAP
-  # stream on the main thread pure). The unit record is exposed to the code
-  # through the read-only unit accessor: bare invocation returns the whole
-  # record, arguments form a chained dict get
+  # The unit code runs in a clean interpreter destroyed right after; its writes
+  # to the standard channels are tallied by the plain puts override (the basic
+  # capture feeding -v/-F/-K), the fancier I/O escapes are denied rather than
+  # contained. The unit record is exposed to the code through the read-only
+  # unit accessor: bare invocation returns the whole record, arguments form
+  # a chained dict get
   variable worker [list {unit paths version {envSnapshot {}} {defTimeout 0}} [string map \
-    [list @EXECWRAP@ $ExecWrap] {
+    [list @STREAMGUARD@ $StreamGuard] {
     # One environment snapshot taken after discovery serves every unit:
     # rebuilding ::env reads it under a global lock, serializing the workers
     if {$envSnapshot eq {}} {
@@ -495,16 +452,46 @@ if {$context eq {toplevel}} {
       }
       if {$envSnapshot eq {}} {set envSnapshot [array get ::env]}
     }
-    # The helper procs carry absolute names: the body runs unchanged in the
-    # worker threads (installed at their global level) and in the serial
-    # main interpreter (installed under the driver namespace)
-    proc ::Capture {chan cmd handle args} {
-      switch -- $cmd {
-        initialize {return {initialize finalize write}}
-        write {append ::captured($chan) [lindex $args 0]}
-        default {}
+    # The output tally: the standard channel writes accumulate here
+    set ::stdout [list]
+    set ::stderr [list]
+    array set ::partial {stdout 0 stderr 0}
+    set ::skipped 0
+    set ::skip_reason {}
+    set ::childpids {}
+    set ::atend {}
+    # Absolute name: the alias target must resolve in the serial main
+    # interpreter (where this body installs under the driver namespace)
+    # exactly as in the worker threads
+    proc ::Puts {args} {
+      set xargs $args
+      set newline 1
+      if {[llength $args] > 1 && [lindex $args 0] eq {-nonewline}} {
+        set args [lrange $args 1 end]
+        set newline 0
       }
-      return {}
+      if {[llength $args] == 1} {
+        set chan stdout
+        set text [lindex $args 0]
+      } elseif {[llength $args] == 2} {
+        lassign $args chan text
+      } else {
+        tailcall ::tcl::puts {*}$xargs
+      }
+      if {$chan eq {stdout} || $chan eq {stderr}} {
+        set lines [split $text \n]
+        set first [lindex $lines 0]
+        set rest [lrange $lines 1 end]
+        if {$::partial($chan) && [llength [set ::$chan]] > 0} {
+          lset ::$chan end "[lindex [set ::$chan] end]$first"
+        } else {
+          lappend ::$chan $first
+        }
+        foreach line $rest { lappend ::$chan $line }
+        set ::partial($chan) [expr {!$newline}]
+      } else {
+        ::tcl::puts {*}$xargs
+      }
     }
     proc ::Skip {{reason {}}} {
       set ::skipped 1
@@ -533,10 +520,18 @@ if {$context eq {toplevel}} {
       }
       set ::childpids {}
     }
+    # The timeout counterpart of the unit's own cleanup: scripts registered
+    # from the unit run worker-side once the unit is over, whatever happened
+    proc ::AtEndRegister {script} {
+      lappend ::atend $script
+    }
+    proc ::RunAtEnd {} {
+      foreach script $::atend {
+        catch {uplevel #0 $script}
+      }
+      set ::atend {}
+    }
     set ::record $unit
-    set ::skipped 0
-    set ::skip_reason {}
-    set ::childpids {}
     set u [interp create]
     try {
       # Isolate ::env so the unit operates on a private copy without mutating the process-wide environment
@@ -545,7 +540,8 @@ if {$context eq {toplevel}} {
         catch {unset -nocomplain ::env}
         array set ::env $snapshot
       }} $envSnapshot]
-      # The module lookup paths so the unit code may load the companions (buildme etc.)
+      # The module lookup paths so the unit code may load shellme (a toplevel
+      # module resolved through them) and the extra/ companions
       interp eval $u [list tcl::tm::path add {*}$paths]
       foreach p $paths {
         set extraDir [file join $p extra]
@@ -571,16 +567,65 @@ if {$context eq {toplevel}} {
       }]
       interp eval $u {namespace eval ::testme {namespace export with}}
       interp alias $u ::skip {} ::Skip
-      # The child processes started by the unit (buildme etc.) register here,
+      # The child processes started by the unit (shellme etc.) register here,
       # so the worker can reap them once the unit is over, whatever happened
       interp alias $u ::testme::RegisterPids {} ::RegisterPids
       interp alias $u ::testme::UnregisterPids {} ::UnregisterPids
+      # The timeout-safe cleanup hook (sandbox removal and friends)
+      interp alias $u ::testme::AtEnd {} ::AtEndRegister
       # Unit code must not terminate the process; the attempt is reported as a failure
       interp eval $u {proc exit {args} {return -code error "the unit code requested to terminate the process: exit $args"}}
-      # Unit code must not change working directory (process-wide in multithreaded runner); use buildme instead
-      interp eval $u {proc cd {args} {return -code error "the unit code must not change working directory: use buildme instead"}}
-      # The stream redirection containment for the programs the unit launches
-      interp eval $u {@EXECWRAP@}
+      # Unit code must not change working directory (process-wide in multithreaded runner); use shellme instead
+      interp eval $u {proc cd {args} {return -code error "the unit code must not change working directory: use shellme instead"}}
+      # The basic output capture: stdout and stderr are tallied, other channels pass through
+      interp alias $u ::CapturePuts {} ::Puts
+      interp eval $u {
+        rename puts ::tcl::puts
+        proc puts {args} {
+          set xargs $args
+          if {[llength $args] > 1 && [lindex $args 0] eq {-nonewline}} {
+            set rest [lrange $args 1 end]
+          } else {
+            set rest $args
+          }
+          set chan [expr {[llength $rest] == 1 ? "stdout" : [lindex $rest 0]}]
+          if {$chan eq {stdout} || $chan eq {stderr}} {
+            CapturePuts {*}$xargs
+          } else {
+            ::tcl::puts {*}$xargs
+          }
+        }
+      }
+      # chan puts resolves through the ensemble namespace, so the shadow
+      # feeds it into the same tally; every other chan subcommand is untouched.
+      # The forwarder carries an absolute name: a bare `puts` would resolve
+      # right back to ::tcl::chan::puts and tail-loop forever
+      interp eval $u {
+        namespace eval ::tcl::chan {}
+        catch {rename ::tcl::chan::puts ::tcl::chan::realPuts}
+        proc ::tcl::chan::puts {args} {
+          set rest $args
+          if {[lindex $rest 0] eq {-nonewline}} {set rest [lrange $rest 1 end]}
+          if {[llength $rest] <= 1 || [lindex $rest 0] in {stdout stderr}} {
+            tailcall ::puts {*}$args
+          }
+          tailcall ::tcl::chan::realPuts {*}$args
+        }
+      }
+      # fcopy onto the process streams is denied like any other stream escape
+      interp eval $u {
+        if {[llength [info commands ::testme::RealFcopy]] == 0} {
+          rename fcopy ::testme::RealFcopy
+        }
+        proc fcopy {input output args} {
+          if {$output eq {stdout} || $output eq {stderr}} {
+            return -code error "the code must not write to the process streams (fcopy to $output); write to a file instead"
+          }
+          tailcall ::testme::RealFcopy $input $output {*}$args
+        }
+      }
+      # The stream redirection guard for the programs the unit launches
+      interp eval $u {@STREAMGUARD@}
       # The unit body runs as a named procedure: the failure traces then end
       # at a recognizable boundary instead of exposing the runner machinery
       interp eval $u [list proc ::testme::UnitBody {} [dict get $unit -code]]
@@ -594,23 +639,12 @@ if {$context eq {toplevel}} {
         interp limit $u time -seconds [expr {$deadline / 1000}] \
           -milliseconds [expr {$deadline % 1000}] -granularity 1
       }
-      # The channel capture around the run: puts, chan puts and fcopy alike
-      foreach ch {stdout stderr} {
-        set ::captured($ch) {}
-        set ::capenc($ch) [chan configure $ch -encoding]
-        chan push $ch [list ::Capture $ch]
-      }
-      try {
-        set code [catch {interp eval $u ::testme::UnitBody} result options]
-      } finally {
-        foreach ch {stdout stderr} {
-          catch {flush $ch}
-          catch {chan pop $ch}
-        }
-      }
+      set code [catch {interp eval $u ::testme::UnitBody} result options]
     } finally {
       catch {interp delete $u}
+      # reap the children and run the registered cleanups, whatever happened
       catch {ReapChildren}
+      catch {RunAtEnd}
     }
     if {$code == 1073741823 || $::skipped} {
       set status skipped
@@ -624,17 +658,9 @@ if {$context eq {toplevel}} {
     } else {
       set status error
     }
-    # Decode the captured bytes into the reported line lists
-    set out {}
-    set err {}
-    foreach {ch var} {stdout out stderr err} {
-      set data [set ::captured($ch)]
-      if {$data eq {}} {continue}
-      set text [encoding convertfrom $::capenc($ch) $data]
-      if {[string index $text end] eq "\n"} {set text [string range $text 0 end-1]}
-      set $var [split $text \n]
-    }
-    catch {unset -nocomplain ::captured ::capenc ::skipped ::skip_reason ::record ::childpids}
+    set out $::stdout
+    set err $::stderr
+    catch {unset -nocomplain ::stdout ::stderr ::partial ::skipped ::skip_reason ::record ::childpids ::atend}
     list $status $result $options $out $err
   }]]
 
@@ -922,8 +948,32 @@ if {$context eq {toplevel}} {
         $box eval {catch {namespace import ::testme::unit ::testme::subtest}}
         # Suite code must not terminate the process either
         $box eval {proc exit {args} {return -code error "the suite code requested to terminate the process: exit $args"}}
-        # The stream redirection containment for the programs the suite launches
-        $box eval $::testme::ExecWrap
+        # The suite stdout is the TAP channel of this very run: writing to it
+        # during collection is refused; stderr stays free for the suite's
+        # own diagnostics
+        $box eval {
+          rename puts ::testme::RealPuts
+          proc puts {args} {
+            set rest $args
+            if {[lindex $rest 0] eq {-nonewline}} {set rest [lrange $rest 1 end]}
+            if {[llength $rest] <= 1 || [lindex $rest 0] eq {stdout}} {
+              return -code error "the suite code must not write to stdout during collection; use stderr"
+            }
+            tailcall ::testme::RealPuts {*}$args
+          }
+          namespace eval ::tcl::chan {}
+          catch {rename ::tcl::chan::puts ::tcl::chan::realPuts}
+          proc ::tcl::chan::puts {args} {
+            set rest $args
+            if {[lindex $rest 0] eq {-nonewline}} {set rest [lrange $rest 1 end]}
+            if {[llength $rest] <= 1 || [lindex $rest 0] eq {stdout}} {
+              return -code error "the suite code must not write to stdout during collection; use stderr"
+            }
+            tailcall ::tcl::chan::realPuts {*}$args
+          }
+        }
+        # The stream redirection guard for the programs the suite launches
+        $box eval $::testme::StreamGuard
         # The accumulator shared by the suite layer
         $box eval [list proc ::testme::with {var list code} {
           upvar 1 $var v
@@ -947,17 +997,9 @@ if {$context eq {toplevel}} {
         }
         # Run the suite script from its own directory; the submissions post
         # to the suspended pool right away. The absolute path keeps [info script]
-        # absolute inside the suite, so the suites derive stable paths.
-        # Whatever the script prints while being collected becomes a TAP
-        # comment: lines like "ok 1" or "Bail out!" printed here would
-        # otherwise be consumed as test results of this very run
+        # absolute inside the suite, so the suites derive stable paths
         $box eval [list cd $root]
-        CommentOn
-        try {
-          $box eval [list source $script]
-        } finally {
-          CommentOff
-        }
+        $box eval [list source $script]
       } err opts]} {
         incr failed
         if {!$quiet || $verbose} { puts stderr "testme: suite script $script failed: $err" }
@@ -1048,52 +1090,6 @@ if {$context eq {toplevel}} {
       lappend out $line
     }
     return [join $out \n]
-  }
-
-  # The discovery output containment: everything a suite script prints while
-  # being collected flows through a transform turning each line into a TAP
-  # comment, so no stray (or forged) text can precede the plan as results.
-  # The payload is handled as raw bytes (the transform sits below the
-  # encoding layer); the inserted prefixes are plain ASCII, which keeps any
-  # output encoding intact
-  proc CommentStream {chan cmd handle args} {
-    variable quiet
-    variable commentTail
-    switch -- $cmd {
-      initialize {
-        set commentTail {}
-        return {initialize finalize write}
-      }
-      write {
-        if {$quiet} {return {}}
-        set buf $commentTail[encoding convertfrom iso8859-1 [lindex $args 0]]
-        set out {}
-        while {[set nl [string first \n $buf]] >= 0} {
-          append out "# " [string range $buf 0 $nl]
-          set buf [string range $buf [expr {$nl + 1}] end]
-        }
-        set commentTail $buf
-        return [encoding convertto iso8859-1 $out]
-      }
-      default {}
-    }
-  }
-
-  proc CommentOn {} {
-    variable commentTail
-    set commentTail {}
-    catch {chan push stdout [list ::testme::CommentStream stdout]}
-  }
-
-  proc CommentOff {} {
-    variable commentTail
-    variable quiet
-    catch {chan pop stdout}
-    if {$commentTail ne {} && !$quiet} {
-      # a trailing partial line still deserves its comment marker
-      catch {puts stdout [encoding convertto iso8859-1 "# $commentTail"]}
-    }
-    set commentTail {}
   }
 
   # Print a single TAP test line with its directives and, for a failure, a YAML diagnostic;

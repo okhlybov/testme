@@ -5,4 +5,6 @@ foreach x {p q r} {
   unit -name "param-$x" -tags {slow} [list string toupper $x]
 }
 
-puts b
+# Suite diagnostics belong to stderr: stdout during collection is refused
+# (it is the TAP channel of the run itself)
+puts stderr b

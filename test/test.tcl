@@ -25,7 +25,7 @@ unit -name bare-require [list apply {{root helpers} {
 unit -name unit-layer-face [list apply {{root helpers} {
   source $helpers
   tcl::tm::add $root
-  expect provided [expr {[package require testme] eq {0.1}}]
+  expect provided [expr {[package require testme] eq {0.1.0}}]
   expect helpers [expr {[llength [info commands ::testme::with]] == 1}]
 }} $root $helpers]
 
@@ -139,7 +139,7 @@ unit -name check-staged {
 unit -name version [list apply {{helpers sample} {
   source $helpers
   lassign [capture tclsh $sample --version] code out
-  expect printed [expr {$code == 0 && [string trim $out] eq {0.1}}]
+  expect printed [expr {$code == 0 && [string trim $out] eq {0.1.0}}]
 }} $helpers $sample]
 
 # Environment adjustments made by suites while collected reach the units
