@@ -225,7 +225,18 @@ unit -name run-default-sh {
 }
 "]
   withfixture $pairs {
-    lassign [capture env SHELL=/bin/false tclsh $dir/test.tcl -v -F] code out
+    set old_shell [expr {[info exists ::env(SHELL)] ? $::env(SHELL) : ""}]
+    set had_shell [info exists ::env(SHELL)]
+    set ::env(SHELL) /bin/false
+    try {
+      lassign [capture tclsh $dir/test.tcl -v -F] code out
+    } finally {
+      if {$had_shell} {
+        set ::env(SHELL) $old_shell
+      } else {
+        unset ::env(SHELL)
+      }
+    }
     expect clean-exit [expr {$code == 0}]
     expect unit-ok [expr {[matching $out {^ok \d+ - run-default-sh$}] == 1}]
     expect shell-ran [expr {[string match {*shell-ok*} $out]}]
@@ -247,7 +258,18 @@ unit -name run-bash {
 }
 "]
   withfixture $pairs {
-    lassign [capture env SHELLME_SHELL=bash tclsh $dir/test.tcl -v -F] code out
+    set old_shell [expr {[info exists ::env(SHELLME_SHELL)] ? $::env(SHELLME_SHELL) : ""}]
+    set had_shell [info exists ::env(SHELLME_SHELL)]
+    set ::env(SHELLME_SHELL) bash
+    try {
+      lassign [capture tclsh $dir/test.tcl -v -F] code out
+    } finally {
+      if {$had_shell} {
+        set ::env(SHELLME_SHELL) $old_shell
+      } else {
+        unset ::env(SHELLME_SHELL)
+      }
+    }
     expect clean-exit [expr {$code == 0}]
     expect bash-ran [expr {[string match {*bash=*[0-9]*} $out] && ![string match {*bash=none*} $out]}]
   }
@@ -264,7 +286,11 @@ unit -name shell-quote-hostile [list apply {{helpers root} {
 package require testme
 unit -name hostile-path {
   package require shellme
-  shellme::shell {pwd}
+  if {\$::tcl_platform(platform) eq \"windows\"} {
+    shellme::shell {cd}
+  } else {
+    shellme::shell {pwd}
+  }
   shellme::shell {echo survived}
 }
 "
@@ -383,8 +409,8 @@ package require testme
 package require shellme
 
 shellme::unit -name redirects {
-  exec echo EXECOUT-CAPTURED >@ stdout
-  exec sh -c {echo EXECERR-CAPTURED >&2} 2>@ stderr
+  exec \[info nameofexecutable\] << {puts EXECOUT-CAPTURED} >@ stdout
+  exec \[info nameofexecutable\] << {puts stderr EXECERR-CAPTURED} 2>@ stderr
 }
 "]
   withfixture $pairs {
@@ -471,7 +497,7 @@ package require shellme
 
 shellme::unit -name bare -staging none {
   if {\[shellme::stage\] eq {}} {error {stage should fall back to the unit record}}
-  exec echo BARE-CAPTURED >@ stdout
+  exec \[info nameofexecutable\] << {puts BARE-CAPTURED} >@ stdout
 }
 "]
   withfixture $pairs {
