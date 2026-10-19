@@ -4,11 +4,6 @@
 
 package require Tcl 8.6-
 
-# The module version is carried by the file name
-set version 0.1.0
-regexp -- {-(\d+(?:\.\d+)*)$} [file rootname [file tail [info script]]] -> version
-package provide shellme $version
-
 
 namespace eval ::shellme {
 

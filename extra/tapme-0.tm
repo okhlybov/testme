@@ -10,8 +10,6 @@ catch {tcl::tm::path add [file normalize [file join [file dirname [file normaliz
 catch {tcl::tm::path add [file dirname [file normalize [info script]]]}
 package require clip
 
-package provide tapme 0
-
 
 namespace eval ::tapme {
 
