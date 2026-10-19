@@ -1,3 +1,7 @@
+# testme - a testing pico framework for Tcl
+# https://github.com/okhlybov/testme
+
+
 package require Tcl 8.6-
 
 

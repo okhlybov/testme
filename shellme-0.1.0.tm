@@ -1,5 +1,8 @@
-# shellme - staging, shell & program I/O isolation for the testme units
+# testme - a testing pico framework for Tcl
 # https://github.com/okhlybov/testme
+
+
+# shellme - staging, shell & program I/O isolation for the testme units
 
 
 package require Tcl 8.6-

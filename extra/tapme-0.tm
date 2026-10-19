@@ -1,5 +1,8 @@
-# tapme - a TAP (Test Anything Protocol) consumer for Tcl
+# testme - a testing pico framework for Tcl
 # https://github.com/okhlybov/testme
+
+
+# tapme - a TAP (Test Anything Protocol) consumer for Tcl
 
 
 package require Tcl 8.6-

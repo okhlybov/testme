@@ -1,26 +1,25 @@
-# testme - a Tcl testing pico framework
+# testme - a testing pico framework for Tcl
+# https://github.com/okhlybov/testme
 
 Testme is a compact testing framework for the [Tcl](https://www.tcl-lang.org/) language (compatible with Tcl 8.6+ and Tcl 9.0+) built around three ideas: every unit runs in a pristine interpreter of its own, suites are discovered recursively, and the reported [TAP](https://testanything.org/) stream is guarded so unit and suite output cannot corrupt it.
 
 ## Features
 
-- **Parallel Unit Execution**: Units run across native OS thread pools (`Thread` package) with per-unit interpreter isolation; `-s` degrades to serial execution when threads are unavailable.
-- **TAP 14 & TAP 13 Compliance**: Streams real-time TAP 14 results as tests complete, with strict ascending TAP 13 fallback; test point descriptions escape `\` and `#`, so arbitrary unit names cannot forge directives.
-- **Hierarchical Subtests**: Emits standard indented TAP 14 subtests for discovered sub-suites and in-suite `subtest` blocks under `-n` / `--nested`.
-- **Unit Tagging & Filtering**: Granular test selection via command-line tag inclusions (`+tag` / `tag`) and exclusions (`-tag` after `--`).
-- **Lexical Scoping with `testme::with`**: Scoped tag and parameter accumulation across nested blocks at both suite and unit levels.
-- **Strict Execution Containment**: Units run in isolated interpreter threads with private `::env` environments; unsafe calls like `exit` and `cd` are intercepted and reported as failures without destabilizing the runner.
-- **Unit Timeouts**: `-timeout N` (or a run-wide `--timeout=N` default) stops runaway unit code with `interp limit` and reports `timed out after N s`.
-- **Output Channel Capture**: Unit writes to `stdout` / `stderr` (`puts`, `chan puts`) are buffered per unit, preserving a clean TAP stream; the I/O escapes the basic capture cannot see (`exec` stream redirections, `fcopy` onto the streams, suite stdout during discovery) are denied with a pointer to `shellme`, which captures program I/O properly.
-- **Inline & Staged Execution Modes**: Explicit separation between `-origin` (read-only source directory where suite fixtures reside) and `-stage` (destination directory where files are copied or created).
-- **Extensible Companions**: Automatic module resolution for `shellme` (the staging/shell/program-I/O module shipped alongside testme) and for optional companion libraries in `extra/`.
+- **Parallel unit execution**: Units run across native OS thread pools with per-unit interpreter isolation; `-s` degrades to serial execution when threads are unavailable.
+- **TAP 14 & TAP 13 compliance**: Streams real-time TAP 14 results as tests complete, with strict ascending TAP 13 fallback; test point descriptions escape `\` and `#`, so arbitrary unit names cannot forge directives.
+- **Hierarchical subtests**: Emits standard indented TAP 14 subtests for discovered sub-suites and in-suite `subtest` blocks under `-n` / `--nested`.
+- **Unit tagging & filtering**: Granular test selection via command-line tag inclusions (`+tag` / `tag`) and exclusions (`-tag`).
+- **Lexical scoping with `testme::with`**: Scoped tag and parameter accumulation across nested blocks at both suite and unit levels.
+- **Strict execution containment**: Units run in isolated interpreter threads with private `::env` environments; unsafe calls like `exit` and `cd` are intercepted and reported as failures without destabilizing the runner.
+- **Unit timeouts**: `-timeout N` (or a run-wide `--timeout=N` default) stops runaway unit code with `interp limit` and reports `timed out after N s`.
+- **Output channel capture**: Unit writes to `stdout` / `stderr` (`puts`, `chan puts`) are buffered per unit, preserving a clean TAP stream; the I/O escapes the basic capture cannot see (`exec` stream redirections, `fcopy` onto the streams, suite stdout during discovery) are denied with a pointer to `shellme`, which captures program I/O properly.
+- **Inline & staged execution modes**: Explicit separation between `-origin` (read-only source directory where suite fixtures reside) and `-stage` (destination directory where files are copied or created).
 
 ---
 
 ## Prerequisites
 
 - **Tcl 8.6+** (with **Thread 2.8+**) or **Tcl 9.0+** (with **Thread 3.0+**)
-- *(Optional)* POSIX shell environment for the included [`tapview`](https://gitlab.com/esr/tapview) viewer, or Tcl for the pure-Tcl `extra/tapme-0.tm` consumer.
 
 ---
 
@@ -38,7 +37,7 @@ Run tests and dump captured unit output for failures to `stderr`:
 tclsh test/test.tcl -v
 ```
 
-Run tests and format results with the included `tapview` consumer:
+Run tests and format results with the included [`tapview`](https://gitlab.com/esr/tapview) consumer:
 
 ```shell
 tclsh test/test.tcl | sh tapview
@@ -137,10 +136,10 @@ unit -name "sample-test" -tags {fast smoke} {
 ### Recursive Suite Discovery & Descent
 
 When a test suite runs:
-1. **Toplevel Phase**: The script sets up the worker thread pool and execution environment.
-2. **Suite Discovery**: The suite script is executed inside an isolated interpreter box.
-3. **Subdirectory Descent**: Once the suite script finishes submitting units, `testme` searches immediate subdirectories for scripts matching the suite name (or the pattern set via `-S` / `--source`).
-4. **Umbrella Guard**: Any file sourced by a suite during discovery is recorded in an umbrella trail and will not be re-executed, preventing duplicate runs and breaking symlink cycles.
+1. **Toplevel phase**: The script sets up the worker thread pool and execution environment.
+2. **Suite discovery**: The suite script is executed inside an isolated interpreter box.
+3. **Subdirectory descent**: Once the suite script finishes submitting units, `testme` searches immediate subdirectories for scripts matching the suite name (or the pattern set via `-S` / `--source`).
+4. **Umbrella guard**: Any file sourced by a suite during discovery is recorded in an umbrella trail and will not be re-executed, preventing duplicate runs and breaking symlink cycles.
 
 During suite execution, the current working directory is temporarily switched to the suite script's directory, ensuring relative file operations in the suite script itself resolve locally. While units run, the current directory is the directory the run was started from (all threads of a process share one working directory), so unit code must build paths from `[unit -origin]` / `[unit -stage]` instead of relative names.
 
@@ -149,8 +148,8 @@ During suite execution, the current working directory is temporarily switched to
 By default, `testme` flattens all units across discovered suites into a single continuous sequence (`1..N`), streaming test points in real time as workers complete.
 
 When the `-n` / `--nested` flag is passed in TAP 14 mode, `testme` emits standard hierarchical [TAP 14 Subtests](https://testanything.org/tap-version-14-specification.html):
-- **Discovered Sub-Suites**: Each subdirectory discovered during descent automatically forms an indented subtest block under the parent suite.
-- **Programmatic In-Suite Subtests**: Suites can group child units using the `subtest` command (or `unit -subtest 1`):
+- **Discovered sub-suites**: Each subdirectory discovered during descent automatically forms an indented subtest block under the parent suite.
+- **Programmatic in-suite subtests**: Suites can group child units using the `subtest` command (or `unit -subtest 1`):
 
 ```tcl
 subtest -name "arithmetic" {
@@ -242,12 +241,12 @@ testme::with tags {api} {
 
 Units execute in independent worker threads. The core runner keeps a deliberate divide: what a unit legitimately needs for assertions is **captured**; the I/O escapes that would threaten the TAP stream are **denied** with a pointer to `shellme`, never silently contained.
 
-- **`exit` Containment**: `exit` is trapped; calling `exit` inside unit code fails that specific unit without stopping the test suite.
-- **`cd` Prevention**: Working directory modifications via `cd` are forbidden inside unit interpreters to prevent multithreaded race conditions. Use staging directories or `shellme::sandbox` instead.
-- **`::env` Isolation**: Each unit runs with a private copy of the environment table taken after discovery; mutations do not leak to other units — and they are also *not* passed to programs the unit starts with `exec` (children inherit the process environment of the run, not the unit's modifications). Pass values to child programs explicitly, as arguments or via `shellme::shell`.
-- **Basic Output Capture**: Everything the unit writes to `stdout` / `stderr` through `puts` or `chan puts` is buffered per unit and reported under `-v` / `-F` / `-K`.
-- **Stream Deny List**: The process output streams belong to the runner's TAP report, so `exec` redirections onto them (`>@ stdout`, `2>@ stderr`, split and glued forms), `fcopy` onto them, and suite `puts` to stdout during discovery are refused with an error naming the alternative (`shellme`). Program I/O belongs to [shellme](#shellme--staging-shell--program-io), which captures it properly.
-- **Failure Traces**: Failure diagnostics end at the unit body boundary (`(unit "name" line N)`); the full framework-level trace is kept under `-F`.
+- **`exit` containment**: `exit` is trapped; calling `exit` inside unit code fails that specific unit without stopping the test suite.
+- **`cd` prevention**: Working directory modifications via `cd` are forbidden inside unit interpreters to prevent multithreaded race conditions. Use staging directories or `shellme::sandbox` instead.
+- **`::env` isolation**: Each unit runs with a private copy of the environment table taken after discovery; mutations do not leak to other units — and they are also *not* passed to programs the unit starts with `exec` (children inherit the process environment of the run, not the unit's modifications). Pass values to child programs explicitly, as arguments or via `shellme::shell`.
+- **Basic output capture**: Everything the unit writes to `stdout` / `stderr` through `puts` or `chan puts` is buffered per unit and reported under `-v` / `-F` / `-K`.
+- **Stream deny list**: The process output streams belong to the runner's TAP report, so `exec` redirections onto them (`>@ stdout`, `2>@ stderr`, split and glued forms), `fcopy` onto them, and suite `puts` to stdout during discovery are refused with an error naming the alternative (`shellme`). Program I/O belongs to [shellme](#shellme--staging-shell--program-io), which captures it properly.
+- **Failure traces**: Failure diagnostics end at the unit body boundary (`(unit "name" line N)`); the full framework-level trace is kept under `-F`.
 
 Environment adjustments made by suite scripts *while they are being collected* do reach the units.
 
