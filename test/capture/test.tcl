@@ -109,3 +109,52 @@ unit -name survivor {expr {1}}
     expect run-continues [expr {[matching $out {^ok \d+ - survivor$}] == 1}]
   }
 }} $helpers $root]
+
+# Unit stream redirection to files via -stdout, -stderr, -output
+unit -name capture-file-redirection [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+set here \[file dirname \[info script\]\]
+unit -name redir-split -stdout \[file join \$here out.log\] -stderr \[file join \$here err.log\] {
+  puts stdout \"stdout line\"
+  puts stderr \"stderr line\"
+}
+unit -name redir-combined -output \[file join \$here combined.log\] {
+  puts stdout \"comb line 1\"
+  puts stderr \"comb line 2\"
+}
+unit -name redir-same -stdout \[file join \$here same.log\] -stderr \[file join \$here same.log\] {
+  puts stdout \"same line 1\"
+  puts stderr \"same line 2\"
+}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect clean-exit [expr {$code == 0}]
+    expect split-unit-ok [expr {[matching $out {^ok 1 - redir-split$}] == 1}]
+    expect comb-unit-ok [expr {[matching $out {^ok 2 - redir-combined$}] == 1}]
+    expect same-unit-ok [expr {[matching $out {^ok 3 - redir-same$}] == 1}]
+
+    set f [open [file join $dir out.log] r]
+    set outContent [read $f]
+    close $f
+    expect split-out [expr {[string trim $outContent] eq "stdout line"}]
+
+    set f [open [file join $dir err.log] r]
+    set errContent [read $f]
+    close $f
+    expect split-err [expr {[string trim $errContent] eq "stderr line"}]
+
+    set f [open [file join $dir combined.log] r]
+    set combContent [read $f]
+    close $f
+    expect comb-content [expr {[string match "*comb line 1*comb line 2*" $combContent]}]
+
+    set f [open [file join $dir same.log] r]
+    set sameContent [read $f]
+    close $f
+    expect same-content [expr {[string match "*same line 1*same line 2*" $sameContent]}]
+  }
+}} $helpers $root]

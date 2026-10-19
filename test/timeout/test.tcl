@@ -4,13 +4,29 @@ set here [file dirname [info script]]
 set root [file normalize $here/../..]
 set helpers [file join [file dirname $here] selftest.tcl]
 
-# A busy-looping unit is stopped by its -timeout and reported as failed
+# Core unit rejects -timeout with an explicit error
+unit -name core-unit-rejects-timeout [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+unit -name bad -timeout 1 {expr {1}}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect failed [expr {$code == 1}]
+    expect rejected [expr {[matching $out {unrecognized option "-timeout"}] >= 1}]
+  }
+}} $helpers $root]
+
+# A busy-looping unit is stopped by its -timeout and reported as failed (via shellme::unit)
 unit -name timeout-busy-loop [list apply {{helpers root} {
   source $helpers
   set pairs [list]
   lappend pairs [list test.tcl "tcl::tm::add $root
 package require testme
-unit -name spin -timeout 1 {while {1} {}}
+package require shellme
+shellme::unit -name spin -timeout 1 {while {1} {}}
 "]
   withfixture $pairs {
     set t0 [clock milliseconds]
@@ -29,7 +45,8 @@ unit -name timeout-fractional [list apply {{helpers root} {
   set pairs [list]
   lappend pairs [list test.tcl "tcl::tm::add $root
 package require testme
-unit -name quickspin -timeout 0.3 {while {1} {}}
+package require shellme
+shellme::unit -name quickspin -timeout 0.3 {while {1} {}}
 "]
   withfixture $pairs {
     lassign [capture tclsh $dir/test.tcl] code out
@@ -59,7 +76,8 @@ unit -name timeout-override [list apply {{helpers root} {
   set pairs [list]
   lappend pairs [list test.tcl "tcl::tm::add $root
 package require testme
-unit -name spin -timeout 1 {while {1} {}}
+package require shellme
+shellme::unit -name spin -timeout 1 {while {1} {}}
 unit -name quick {expr {1}}
 "]
   withfixture $pairs {
@@ -75,7 +93,8 @@ unit -name timeout-invalid [list apply {{helpers root} {
   set pairs [list]
   lappend pairs [list test.tcl "tcl::tm::add $root
 package require testme
-unit -name bad -timeout abc {expr {1}}
+package require shellme
+shellme::unit -name bad -timeout abc {expr {1}}
 unit -name good {expr {1}}
 "]
   withfixture $pairs {
@@ -93,7 +112,8 @@ unit -name timeout-todo [list apply {{helpers root} {
   set pairs [list]
   lappend pairs [list test.tcl "tcl::tm::add $root
 package require testme
-unit -name expected -todo {known slow} -timeout 1 {while {1} {}}
+package require shellme
+shellme::unit -name expected -todo {known slow} -timeout 1 {while {1} {}}
 "]
   withfixture $pairs {
     lassign [capture tclsh $dir/test.tcl] code out
@@ -109,7 +129,8 @@ unit -name timeout-serial [list apply {{helpers root} {
   set pairs [list]
   lappend pairs [list test.tcl "tcl::tm::add $root
 package require testme
-unit -name spin -timeout 1 {while {1} {}}
+package require shellme
+shellme::unit -name spin -timeout 1 {while {1} {}}
 unit -name quick {expr {1}}
 "]
   withfixture $pairs {

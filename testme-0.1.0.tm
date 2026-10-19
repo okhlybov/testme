@@ -22,16 +22,26 @@ if {$context eq {nested}} {
   # and the returned ticket is the unit number in the TAP plan.
   # The submission crosses the interpreter boundary through the ::testme::submit
   # alias planted by the driver.
-  # The recognized options (-name, -tags, -skip, -todo) are consumed by the driver;
-  # the rest passes through the unit record for the unit code to read
-  # through the unit accessor
+  # Declare a unit of work. The submission is immediate - a parametrization cycle
+  # is expected to submit the whole series before any unit starts running -
+  # and the returned ticket is the unit number in the TAP plan.
+  # The submission crosses the interpreter boundary through the ::testme::submit
+  # alias planted by the driver.
+  # Core unit accepts minimal options: test identity (-name, -tags), directives
+  # (-skip, -todo), and standard stream redirection (-stdout, -stderr, -output).
+  # Advanced execution options (such as -timeout and sandbox staging) are relegated
+  # to specific unit wrappers like shellme::unit.
   proc unit {args} {
     set nargs [llength $args]
-    if {$nargs < 1 || $nargs % 2 == 0} {error "usage: testme::unit ?-name ...? ?-tags ...? ?-skip reason? ?-todo reason? ?-anything ...? {code...}"}
+    if {$nargs < 1 || $nargs % 2 == 0} {
+      error "usage: testme::unit ?-name string? ?-tags list? ?-skip reason? ?-todo reason? ?-stdout file? ?-stderr file? ?-output file? code"
+    }
     set opts [lrange $args 0 end-1]
     set code [lindex $args end]
-    if {[dict exists $opts -subtest] && [dict get $opts -subtest]} {
-      return [::testme::subtest_submit $opts $code]
+    foreach {k v} $opts {
+      if {$k ni {-name -tags -skip -todo -stdout -stderr -output}} {
+        error "testme::unit: unrecognized option \"$k\", expected -name, -tags, -skip, -todo, -stdout, -stderr, -output"
+      }
     }
     return [::testme::submit $opts $code]
   }
@@ -39,9 +49,16 @@ if {$context eq {nested}} {
   # Declare a subtest block containing child units
   proc subtest {args} {
     set nargs [llength $args]
-    if {$nargs < 1 || $nargs % 2 == 0} {error "usage: testme::subtest ?-name ...? ?-tags ...? ?-skip reason? ?-todo reason? {code...}"}
+    if {$nargs < 1 || $nargs % 2 == 0} {
+      error "usage: testme::subtest ?-name string? ?-tags list? ?-skip reason? ?-todo reason? code"
+    }
     set opts [lrange $args 0 end-1]
     set code [lindex $args end]
+    foreach {k v} $opts {
+      if {$k ni {-name -tags -skip -todo}} {
+        error "testme::subtest: unrecognized option \"$k\", expected -name, -tags, -skip, -todo"
+      }
+    }
     return [::testme::subtest_submit $opts $code]
   }
 
@@ -434,249 +451,373 @@ if {$context eq {toplevel}} {
   }
 
   # The worker-side unit runner. The pool -initcmd installs it once per worker
-  # thread (the serial mode installs the same body under the driver namespace),
-  # so the jobs carry only the unit record instead of the whole runner script.
+  # thread (the serial mode evaluates the same script in the driver interpreter),
+  # so the jobs carry only the unit record instead of the runner script.
+  # Procedures live in ::testme::worker, avoiding global namespace pollution.
   # The unit code runs in a clean interpreter destroyed right after; its writes
-  # to the standard channels are tallied by the plain puts override (the basic
-  # capture feeding -v/-F/-K), the fancier I/O escapes are denied rather than
-  # contained. The unit record is exposed to the code through the read-only
-  # unit accessor: bare invocation returns the whole record, arguments form
-  # a chained dict get
-  variable worker [list {unit paths version {envSnapshot {}} {defTimeout 0}} [string map \
-    [list @STREAMGUARD@ $StreamGuard] {
-    # One environment snapshot taken after discovery serves every unit:
-    # rebuilding ::env reads it under a global lock, serializing the workers
-    if {$envSnapshot eq {}} {
-      if {[llength [info commands tsv::get]]} {
-        catch {set envSnapshot [tsv::get ::testme env]}
+  # to the standard channels are tallied by the puts override (and optionally
+  # mirrored to files via -stdout, -stderr, -output).
+  variable workerInit {
+    namespace eval ::testme::worker {
+      variable stdout [list]
+      variable stderr [list]
+      variable partial
+      array set partial {stdout 0 stderr 0}
+      variable skipped 0
+      variable skip_reason {}
+      variable record {}
+      variable childpids [list]
+      variable atend [list]
+      variable redirs [dict create]
+
+      variable StreamGuard {
+        if {[llength [info commands ::testme::RealExec]] == 0} {
+          rename exec ::testme::RealExec
+        }
+        proc exec {args} {
+          set argv $args
+          set background [expr {[lindex $argv end] eq "&"}]
+          if {$background} {set argv [lrange $argv 0 end-1]}
+          set n [llength $argv]
+          for {set i 0} {$i < $n} {incr i} {
+            set w [lindex $argv $i]
+            set chan {}
+            if {[regexp {^(?:2>@|>&@|>@)(stdout|stderr)$} $w -> chan]} {
+            } elseif {($w eq {>@} || $w eq {2>@} || $w eq {>&@})
+                      && [lindex $argv [expr {$i + 1}]] in {stdout stderr}} {
+              set chan [lindex $argv [expr {$i + 1}]]
+            }
+            if {$chan ne {}} {
+              return -code error "the code must not write to the process streams (redirection to $chan); run external programs through shellme"
+            }
+          }
+          if {$background} {lappend argv &}
+          tailcall ::testme::RealExec {*}$argv
+        }
       }
-      if {$envSnapshot eq {}} {set envSnapshot [array get ::env]}
-    }
-    # The output tally: the standard channel writes accumulate here
-    set ::stdout [list]
-    set ::stderr [list]
-    array set ::partial {stdout 0 stderr 0}
-    set ::skipped 0
-    set ::skip_reason {}
-    set ::childpids {}
-    set ::atend {}
-    # Absolute name: the alias target must resolve in the serial main
-    # interpreter (where this body installs under the driver namespace)
-    # exactly as in the worker threads
-    proc ::Puts {args} {
-      set xargs $args
-      set newline 1
-      if {[llength $args] > 1 && [lindex $args 0] eq {-nonewline}} {
-        set args [lrange $args 1 end]
-        set newline 0
-      }
-      if {[llength $args] == 1} {
-        set chan stdout
-        set text [lindex $args 0]
-      } elseif {[llength $args] == 2} {
-        lassign $args chan text
-      } else {
-        tailcall ::tcl::puts {*}$xargs
-      }
-      if {$chan eq {stdout} || $chan eq {stderr}} {
-        set lines [split $text \n]
-        set first [lindex $lines 0]
-        set rest [lrange $lines 1 end]
-        if {$::partial($chan) && [llength [set ::$chan]] > 0} {
-          lset ::$chan end "[lindex [set ::$chan] end]$first"
+
+      proc ResetState {unit} {
+        variable stdout [list]
+        variable stderr [list]
+        variable partial
+        array set partial {stdout 0 stderr 0}
+        variable skipped 0
+        variable skip_reason {}
+        variable record $unit
+        variable childpids [list]
+        variable atend [list]
+        variable redirs [dict create]
+
+        # Configure file redirections (-stdout, -stderr, -output)
+        set outPath {}
+        set errPath {}
+        if {[dict exists $unit -output]} {
+          set outPath [dict get $unit -output]
+          set errPath $outPath
+        }
+        if {[dict exists $unit -stdout]} { set outPath [dict get $unit -stdout] }
+        if {[dict exists $unit -stderr]} { set errPath [dict get $unit -stderr] }
+
+        if {$outPath ne {} && $outPath eq $errPath} {
+          if {![catch {
+            file mkdir [file dirname [file normalize $outPath]]
+            set f [open $outPath a]
+            fconfigure $f -buffering line -translation auto
+            dict set redirs stdout $f
+            dict set redirs stderr $f
+          }]} {}
         } else {
-          lappend ::$chan $first
-        }
-        foreach line $rest { lappend ::$chan $line }
-        set ::partial($chan) [expr {!$newline}]
-      } else {
-        ::tcl::puts {*}$xargs
-      }
-    }
-    proc ::Skip {{reason {}}} {
-      set ::skipped 1
-      set ::skip_reason $reason
-      return -code 1073741823 -level 0 $reason
-    }
-    proc ::Context {args} {
-      if {![llength $args]} {return $::record}
-      tailcall dict get $::record {*}$args
-    }
-    proc ::RegisterPids {pids} {
-      foreach pid $pids {lappend ::childpids $pid}
-    }
-    proc ::UnregisterPids {pids} {
-      set ::childpids [lsearch -all -inline -not -exact $::childpids {*}$pids]
-    }
-    # Reaps the children a unit left behind: a timed out unit cannot clean up
-    # after itself, its interpreter refuses every further evaluation
-    proc ::ReapChildren {} {
-      foreach pid $::childpids {
-        if {$::tcl_platform(platform) eq "windows"} {
-          catch {exec taskkill /PID $pid /T /F}
-        } elseif {[catch {exec kill -9 -- -$pid}]} {
-          catch {exec kill -9 -- $pid}
+          if {$outPath ne {}} {
+            if {![catch {
+              file mkdir [file dirname [file normalize $outPath]]
+              set f [open $outPath a]
+              fconfigure $f -buffering line -translation auto
+              dict set redirs stdout $f
+            }]} {}
+          }
+          if {$errPath ne {}} {
+            if {![catch {
+              file mkdir [file dirname [file normalize $errPath]]
+              set f [open $errPath a]
+              fconfigure $f -buffering line -translation auto
+              dict set redirs stderr $f
+            }]} {}
+          }
         }
       }
-      set ::childpids {}
-    }
-    # The timeout counterpart of the unit's own cleanup: scripts registered
-    # from the unit run worker-side once the unit is over, whatever happened
-    proc ::AtEndRegister {script} {
-      lappend ::atend $script
-    }
-    proc ::RunAtEnd {} {
-      foreach script $::atend {
-        catch {uplevel #0 $script}
+
+      proc CloseRedirs {} {
+        variable redirs
+        foreach f [lsort -unique [dict values $redirs]] {
+          catch {close $f}
+        }
+        set redirs [dict create]
       }
-      set ::atend {}
-    }
-    set ::record $unit
-    set u [interp create]
-    try {
-      # Isolate ::env so the unit operates on a private copy without mutating the process-wide environment
-      $u eval [list apply {{snapshot} {
-        trace add variable ::env unset {apply {{args} {return -code error "blocked"}}}
-        catch {unset -nocomplain ::env}
-        array set ::env $snapshot
-      }} $envSnapshot]
-      # The module lookup paths so the unit code may load shellme (a toplevel
-      # module resolved through them) and the extra/ companions
-      interp eval $u [list tcl::tm::path add {*}$paths]
-      foreach p $paths {
-        set extraDir [file join $p extra]
-        if {[file isdirectory $extraDir]} {
-          foreach tm [glob -nocomplain -directory $extraDir *.tm] {
-            if {[regexp {^([^-]+)-(\d+(?:\.\d+)*)\.tm$} [file tail $tm] -> pkg ver]} {
-              interp eval $u [list package ifneeded $pkg $ver [list apply {{f p v} {source $f; package provide $p $v}} $tm $pkg $ver]]
+
+      proc Puts {args} {
+        variable stdout
+        variable stderr
+        variable partial
+        variable redirs
+        set xargs $args
+        set newline 1
+        if {[llength $args] > 1 && [lindex $args 0] eq {-nonewline}} {
+          set args [lrange $args 1 end]
+          set newline 0
+        }
+        if {[llength $args] == 1} {
+          set chan stdout
+          set text [lindex $args 0]
+        } elseif {[llength $args] == 2} {
+          lassign $args chan text
+        } else {
+          tailcall ::tcl::puts {*}$xargs
+        }
+        if {$chan eq {stdout} || $chan eq {stderr}} {
+          set lines [split $text \n]
+          set first [lindex $lines 0]
+          set rest [lrange $lines 1 end]
+          if {$partial($chan) && [llength [set $chan]] > 0} {
+            lset $chan end "[lindex [set $chan] end]$first"
+          } else {
+            lappend $chan $first
+          }
+          foreach line $rest { lappend $chan $line }
+          set partial($chan) [expr {!$newline}]
+
+          if {[dict exists $redirs $chan]} {
+            set f [dict get $redirs $chan]
+            catch {
+              if {$newline} {
+                puts $f $text
+              } else {
+                puts -nonewline $f $text
+              }
+            }
+          }
+        } else {
+          ::tcl::puts {*}$xargs
+        }
+      }
+
+      proc Skip {{reason {}}} {
+        variable skipped 1
+        variable skip_reason $reason
+        return -code 1073741823 -level 0 $reason
+      }
+
+      proc Context {args} {
+        variable record
+        if {![llength $args]} {return $record}
+        tailcall dict get $record {*}$args
+      }
+
+      proc RegisterPids {pids} {
+        variable childpids
+        foreach pid $pids { lappend childpids $pid }
+      }
+
+      proc UnregisterPids {pids} {
+        variable childpids
+        set childpids [lsearch -all -inline -not -exact $childpids {*}$pids]
+      }
+
+      proc ReapChildren {} {
+        variable childpids
+        foreach pid $childpids {
+          if {$::tcl_platform(platform) eq "windows"} {
+            catch {exec taskkill /PID $pid /T /F}
+          } elseif {[catch {exec kill -9 -- -$pid}]} {
+            catch {exec kill -9 -- $pid}
+          }
+        }
+        set childpids [list]
+      }
+
+      proc AtEndRegister {script} {
+        variable atend
+        lappend atend $script
+      }
+
+      proc RunAtEnd {} {
+        variable atend
+        foreach script $atend {
+          catch {uplevel #0 $script}
+        }
+        set atend [list]
+      }
+
+      proc SetupInterp {u unit paths version envSnapshot limit} {
+        variable StreamGuard
+
+        # Isolate ::env so the unit operates on a private copy without mutating the process-wide environment
+        $u eval [list apply {{snapshot} {
+          trace add variable ::env unset {apply {{args} {return -code error "blocked"}}}
+          catch {unset -nocomplain ::env}
+          array set ::env $snapshot
+        }} $envSnapshot]
+
+        # The module lookup paths so the unit code may load shellme and the extra/ companions
+        interp eval $u [list tcl::tm::path add {*}$paths]
+        foreach p $paths {
+          set extraDir [file join $p extra]
+          if {[file isdirectory $extraDir]} {
+            foreach tm [glob -nocomplain -directory $extraDir *.tm] {
+              if {[regexp {^([^-]+)-(\d+(?:\.\d+)*)\.tm$} [file tail $tm] -> pkg ver]} {
+                interp eval $u [list package ifneeded $pkg $ver [list apply {{f p v} {source $f; package provide $p $v}} $tm $pkg $ver]]
+              }
             }
           }
         }
-      }
-      # The unit layer face of the testme package: the helpers only
-      interp eval $u [list package ifneeded testme $version [list package provide testme $version]]
-      interp eval $u {namespace eval ::testme {}}
-      interp alias $u ::testme::unit {} ::Context
-      interp eval $u {namespace eval ::testme {namespace export unit}}
-      catch {interp eval $u {namespace eval :: {namespace import ::testme::unit}}}
-      interp eval $u [list proc ::testme::with {var list code} {
-        upvar 1 $var v
-        if {[catch {set v}]} {set v [list]}
-        set list [concat $v $list]
-        apply [list $var $code] $list
-      }]
-      interp eval $u {namespace eval ::testme {namespace export with}}
-      interp alias $u ::skip {} ::Skip
-      # The child processes started by the unit (shellme etc.) register here,
-      # so the worker can reap them once the unit is over, whatever happened
-      interp alias $u ::testme::RegisterPids {} ::RegisterPids
-      interp alias $u ::testme::UnregisterPids {} ::UnregisterPids
-      # The timeout-safe cleanup hook (sandbox removal and friends)
-      interp alias $u ::testme::AtEnd {} ::AtEndRegister
-      # Unit code must not terminate the process; the attempt is reported as a failure
-      interp eval $u {proc exit {args} {return -code error "the unit code requested to terminate the process: exit $args"}}
-      # Unit code must not change working directory (process-wide in multithreaded runner); use shellme instead
-      interp eval $u {proc cd {args} {return -code error "the unit code must not change working directory: use shellme instead"}}
-      # The basic output capture: stdout and stderr are tallied, other channels pass through
-      interp alias $u ::CapturePuts {} ::Puts
-      interp eval $u {
-        rename puts ::tcl::puts
-        proc puts {args} {
-          set xargs $args
-          if {[llength $args] > 1 && [lindex $args 0] eq {-nonewline}} {
-            set rest [lrange $args 1 end]
-          } else {
+
+        # The unit layer face of the testme package: the helpers only
+        interp eval $u [list package ifneeded testme $version [list package provide testme $version]]
+        interp eval $u {namespace eval ::testme {}}
+        interp alias $u ::testme::unit {} ::testme::worker::Context
+        interp eval $u {namespace eval ::testme {namespace export unit}}
+        catch {interp eval $u {namespace eval :: {namespace import ::testme::unit}}}
+        interp eval $u [list proc ::testme::with {var list code} {
+          upvar 1 $var v
+          if {[catch {set v}]} {set v [list]}
+          set list [concat $v $list]
+          apply [list $var $code] $list
+        }]
+        interp eval $u {namespace eval ::testme {namespace export with}}
+        interp alias $u ::skip {} ::testme::worker::Skip
+
+        # The child processes started by the unit (shellme etc.) register here,
+        # so the worker can reap them once the unit is over, whatever happened
+        interp alias $u ::testme::RegisterPids {} ::testme::worker::RegisterPids
+        interp alias $u ::testme::UnregisterPids {} ::testme::worker::UnregisterPids
+
+        # The timeout-safe cleanup hook (sandbox removal and friends)
+        interp alias $u ::testme::AtEnd {} ::testme::worker::AtEndRegister
+
+        # Unit code execution guards
+        interp eval $u {proc exit {args} {return -code error "the unit code requested to terminate the process: exit $args"}}
+        interp eval $u {proc cd {args} {return -code error "the unit code must not change working directory: use shellme instead"}}
+
+        # fcopy onto process streams is denied
+        interp eval $u {
+          if {[llength [info commands ::testme::RealFcopy]] == 0} {
+            rename fcopy ::testme::RealFcopy
+          }
+          proc fcopy {input output args} {
+            if {$output eq {stdout} || $output eq {stderr}} {
+              return -code error "the code must not write to the process streams (fcopy to $output); write to a file instead"
+            }
+            tailcall ::testme::RealFcopy $input $output {*}$args
+          }
+        }
+
+        # The stream redirection guard for programs the unit launches
+        interp eval $u $StreamGuard
+
+        # The basic output capture: stdout and stderr are tallied
+        interp alias $u ::CapturePuts {} ::testme::worker::Puts
+        interp eval $u {
+          rename puts ::tcl::puts
+          proc puts {args} {
+            set xargs $args
+            if {[llength $args] > 1 && [lindex $args 0] eq {-nonewline}} {
+              set rest [lrange $args 1 end]
+            } else {
+              set rest $args
+            }
+            set chan [expr {[llength $rest] == 1 ? "stdout" : [lindex $rest 0]}]
+            if {$chan eq {stdout} || $chan eq {stderr}} {
+              CapturePuts {*}$xargs
+            } else {
+              ::tcl::puts {*}$xargs
+            }
+          }
+          namespace eval ::tcl::chan {}
+          catch {rename ::tcl::chan::puts ::tcl::chan::realPuts}
+          proc ::tcl::chan::puts {args} {
             set rest $args
-          }
-          set chan [expr {[llength $rest] == 1 ? "stdout" : [lindex $rest 0]}]
-          if {$chan eq {stdout} || $chan eq {stderr}} {
-            CapturePuts {*}$xargs
-          } else {
-            ::tcl::puts {*}$xargs
+            if {[lindex $rest 0] eq {-nonewline}} {set rest [lrange $rest 1 end]}
+            if {[llength $rest] <= 1 || [lindex $rest 0] in {stdout stderr}} {
+              tailcall ::puts {*}$args
+            }
+            tailcall ::tcl::chan::realPuts {*}$args
           }
         }
+
+        # The unit body runs as a named procedure
+        interp eval $u [list proc ::testme::UnitBody {} [dict get $unit -code]]
+
+        # The optional unit time limit
+        if {$limit > 0} {
+          set deadline [expr {[clock milliseconds] + int($limit * 1000)}]
+          interp limit $u time -seconds [expr {$deadline / 1000}] \
+            -milliseconds [expr {$deadline % 1000}] -granularity 1
+        }
       }
-      # chan puts resolves through the ensemble namespace, so the shadow
-      # feeds it into the same tally; every other chan subcommand is untouched.
-      # The forwarder carries an absolute name: a bare `puts` would resolve
-      # right back to ::tcl::chan::puts and tail-loop forever
-      interp eval $u {
-        namespace eval ::tcl::chan {}
-        catch {rename ::tcl::chan::puts ::tcl::chan::realPuts}
-        proc ::tcl::chan::puts {args} {
-          set rest $args
-          if {[lindex $rest 0] eq {-nonewline}} {set rest [lrange $rest 1 end]}
-          if {[llength $rest] <= 1 || [lindex $rest 0] in {stdout stderr}} {
-            tailcall ::puts {*}$args
+
+      proc RunUnit {unit paths version {envSnapshot {}} {defTimeout 0}} {
+        variable stdout
+        variable stderr
+        variable skipped
+        variable skip_reason
+
+        # One environment snapshot taken after discovery serves every unit
+        if {$envSnapshot eq {}} {
+          if {[llength [info commands tsv::get]]} {
+            catch {set envSnapshot [tsv::get ::testme env]}
           }
-          tailcall ::tcl::chan::realPuts {*}$args
+          if {$envSnapshot eq {}} {set envSnapshot [array get ::env]}
         }
-      }
-      # fcopy onto the process streams is denied like any other stream escape
-      interp eval $u {
-        if {[llength [info commands ::testme::RealFcopy]] == 0} {
-          rename fcopy ::testme::RealFcopy
+
+        ResetState $unit
+
+        set limit 0
+        if {[dict exists $unit -timeout]} {set limit [dict get $unit -timeout]}
+        if {$limit <= 0 && $defTimeout > 0} {set limit $defTimeout}
+
+        set u [interp create]
+        try {
+          SetupInterp $u $unit $paths $version $envSnapshot $limit
+          set code [catch {interp eval $u ::testme::UnitBody} result options]
+        } finally {
+          catch {interp delete $u}
+          catch {ReapChildren}
+          catch {RunAtEnd}
+          CloseRedirs
         }
-        proc fcopy {input output args} {
-          if {$output eq {stdout} || $output eq {stderr}} {
-            return -code error "the code must not write to the process streams (fcopy to $output); write to a file instead"
-          }
-          tailcall ::testme::RealFcopy $input $output {*}$args
+
+        if {$code == 1073741823 || $skipped} {
+          set status skipped
+          if {$code != 1073741823} { set result $skip_reason }
+        } elseif {$code == 0} {
+          set status ok
+        } elseif {$code == 1 && [dict exists $options -errorcode]
+                  && [lrange [dict get $options -errorcode] 0 2] eq {TCL LIMIT TIME}} {
+          set status timeout
+          set result "timed out after $limit s"
+        } else {
+          set status error
         }
+
+        set out $stdout
+        set err $stderr
+        return [list $status $result $options $out $err]
       }
-      # The stream redirection guard for the programs the unit launches
-      interp eval $u {@STREAMGUARD@}
-      # The unit body runs as a named procedure: the failure traces then end
-      # at a recognizable boundary instead of exposing the runner machinery
-      interp eval $u [list proc ::testme::UnitBody {} [dict get $unit -code]]
-      # The optional unit time limit; a limit spent leaves the interpreter
-      # refusing every further evaluation, so nothing may follow the body in it
-      set limit 0
-      if {[dict exists $unit -timeout]} {set limit [dict get $unit -timeout]}
-      if {$limit <= 0 && $defTimeout > 0} {set limit $defTimeout}
-      if {$limit > 0} {
-        set deadline [expr {[clock milliseconds] + int($limit * 1000)}]
-        interp limit $u time -seconds [expr {$deadline / 1000}] \
-          -milliseconds [expr {$deadline % 1000}] -granularity 1
-      }
-      set code [catch {interp eval $u ::testme::UnitBody} result options]
-    } finally {
-      catch {interp delete $u}
-      # reap the children and run the registered cleanups, whatever happened
-      catch {ReapChildren}
-      catch {RunAtEnd}
     }
-    if {$code == 1073741823 || $::skipped} {
-      set status skipped
-      if {$code != 1073741823} { set result $::skip_reason }
-    } elseif {$code == 0} {
-      set status ok
-    } elseif {$code == 1 && [dict exists $options -errorcode]
-              && [lrange [dict get $options -errorcode] 0 2] eq {TCL LIMIT TIME}} {
-      set status timeout
-      set result "timed out after $limit s"
-    } else {
-      set status error
-    }
-    set out $::stdout
-    set err $::stderr
-    catch {unset -nocomplain ::stdout ::stderr ::partial ::skipped ::skip_reason ::record ::childpids ::atend}
-    list $status $result $options $out $err
-  }]]
+
+    proc ::RunUnit {args} { tailcall ::testme::worker::RunUnit {*}$args }
+  }
 
   # Ship the runner into its hosting interpreters: the worker threads receive
-  # it through the pool -initcmd once per thread, the serial mode installs the
-  # same body under the driver namespace (the parallel jobs refer to the plain
-  # global ::RunUnit inside their own threads)
-  lassign $worker runnerArgs runnerBody
+  # it through the pool -initcmd once per thread, the serial mode evaluates the
+  # same script under the driver interpreter
   if {!$serial} {
     set cores [expr {$jobs > 0 ? $jobs : [CoreCount]}]
     set pool [tpool::create -minworkers $cores -maxworkers $cores \
-      -initcmd [list proc ::RunUnit $runnerArgs $runnerBody]]
+      -initcmd $workerInit]
     # Enter submit phase: the units accumulate while the suite tree is being discovered
     tpool::suspend $pool
   } else {
-    proc RunUnit $runnerArgs $runnerBody
+    eval $workerInit
   }
   # The shared elements of two lists
   proc Intersect {a b} {

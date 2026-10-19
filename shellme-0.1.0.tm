@@ -3,7 +3,11 @@
 
 
 package require Tcl 8.6-
-package provide shellme 0
+
+# The module version is carried by the file name
+set version 0.1.0
+regexp -- {-(\d+(?:\.\d+)*)$} [file rootname [file tail [info script]]] -> version
+package provide shellme $version
 
 
 namespace eval ::shellme {
@@ -420,7 +424,7 @@ namespace eval ::shellme {
   proc unit {args} {
     set nargs [llength $args]
     if {$nargs < 1 || $nargs % 2 == 0} {
-      error "usage: shellme::unit ?-name ...? ?-tags ...? ?-skip ...? ?-todo ...? ?-timeout N? ?-seed dir? ?-exclude patterns? ?-only paths? ?-staging auto|none? ?anything ...? {code...}"
+      error "usage: shellme::unit ?-name ...? ?-tags ...? ?-skip ...? ?-todo ...? ?-timeout N? ?-seed dir? ?-exclude patterns? ?-only paths? ?-staging auto|none? ?-stdout file? ?-stderr file? ?-output file? {code...}"
     }
     set opts [lrange $args 0 end-1]
     set body [lindex $args end]
@@ -428,14 +432,22 @@ namespace eval ::shellme {
     set exclude {.git .hg .svn CVS _darcs}
     set only {}
     set staging auto
-    set rest [list]
+    set submitOpts [dict create]
     foreach {k v} $opts {
       switch -- $k {
         -seed {set seed $v}
         -exclude {set exclude $v}
         -only {set only $v}
         -staging {set staging $v}
-        default {lappend rest $k $v}
+        -timeout {
+          dict set submitOpts -timeout $v
+        }
+        -name - -tags - -skip - -todo - -stdout - -stderr - -output {
+          dict set submitOpts $k $v
+        }
+        default {
+          error "shellme::unit: unrecognized option \"$k\""
+        }
       }
     }
     if {$staging ni {auto none}} {
@@ -457,7 +469,11 @@ namespace eval ::shellme {
         }
       }] $body $seed $exclude $only]
     }
-    uplevel 1 [concat [list ::unit] $rest [list $wrapped]]
+    if {[llength [info commands ::testme::submit]] > 0} {
+      ::testme::submit $submitOpts $wrapped
+    } else {
+      uplevel 1 [concat [list ::unit] $submitOpts [list $wrapped]]
+    }
   }
 
 

@@ -183,16 +183,18 @@ Creates an auto-named unit (`unit<id>`) that passes if the code block completes 
 ### Full-Fledged Unit
 
 ```tcl
-unit -name "user-auth" -tags {auth database} -timeout 5 {
+unit -name "user-auth" -tags {auth database} -stdout "auth.log" {
   set origin [unit -origin]
   set stage  [unit -stage]
   # test logic
 }
 ```
 
+Core `unit` accepts minimal options: test identity (`-name`, `-tags`), runtime directives (`-skip`, `-todo`), and channel redirections (`-stdout`, `-stderr`, `-output`). Advanced execution options such as per-unit `-timeout` and sandbox staging are provided by wrappers like `shellme::unit`.
+
 ### Unit Timeouts
 
-`-timeout N` (seconds, fractional values allowed) stops unit code that runs too long via an interpreter time limit: the unit is reported as failed with `timed out after N s`. A TODO unit that times out remains an expected failure. `--timeout=N` sets a default for units without their own `-timeout`; an invalid `-timeout` value fails the unit immediately instead of running it.
+The run-wide CLI flag `--timeout=N` sets a default timeout in seconds for units (fractional values allowed), stopping runaway code with an interpreter time limit (`timed out after N s`). Per-unit `-timeout N` is supported via `shellme::unit`. A TODO unit that times out remains an expected failure; an invalid `-timeout` value fails the unit immediately instead of running it.
 
 The limit stops Tcl code (busy loops, `after` waits). A unit blocked in an external program is reaped when the limit fires (its child processes are killed by the worker), but the unit itself cannot run cleanup code afterwards.
 
@@ -253,7 +255,7 @@ Environment adjustments made by suite scripts *while they are being collected* d
 
 ## Companion Modules
 
-`shellme` ships at the top level next to testme itself (`shellme-0.tm`) and is resolved through the same module path; the optional companions reside in `extra/` and are discovered automatically without extra `tcl::tm::path` configuration.
+The optional companions reside in `extra/` and are discovered automatically without extra `tcl::tm::path` configuration.
 
 ### `shellme` - Staging, Shell & Program I/O
 
@@ -274,7 +276,7 @@ shellme::unit -name "compile-project" -tags {build} -timeout 120 {
 unit -name "math" {expr {2 + 2 == 4}}
 ```
 
-- **`shellme::unit ?options? { code }`** — submits through the ordinary `unit` machinery (`-name`, `-tags`, `-skip`, `-todo`, `-timeout`, `-subtest` and custom pass-through options all work), wrapping the body in:
+- **`shellme::unit ?options? { code }`** — submits a unit configured for file and program execution (`-name`, `-tags`, `-skip`, `-todo`, `-timeout`, `-stdout`, `-stderr`, `-output` and staging options all work), wrapping the body in:
   - a per-unit **staging sandbox** seeded from `[unit -origin]`, removed on completion (even when the unit times out, or `-K` retains it);
   - `shellme::shell` targeting the sandbox;
   - **program I/O capture**: `exec … >@ stdout` / `2>@ stderr` redirections are rerouted through temporary files and collected into the unit's output report instead of being denied.

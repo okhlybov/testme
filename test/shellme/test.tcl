@@ -348,8 +348,8 @@ unit -name shell-unit-timeout-kills [list apply {{helpers root} {
   set pairs [list]
   lappend pairs [list test.tcl "tcl::tm::add $root
 package require testme
-unit -name stuck -timeout 1 {
-  package require shellme
+package require shellme
+shellme::unit -name stuck -timeout 1 {
   shellme::shell {sleep 987656}
 }
 unit -name witness {
@@ -507,5 +507,27 @@ shellme::unit -name bare -staging none {
     expect stream-clean [expr {[matching $out {BARE-CAPTURED}] == 0}]
     lassign [capture tclsh $dir/test.tcl -v -F] code2 out2
     expect captured [expr {[matching $out2 {BARE-CAPTURED}] >= 1}]
+  }
+}} $helpers $root]
+
+# shellme version matches testme's version (0.1.0)
+unit -name shellme-version [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+package require shellme 0.1.0
+
+unit -name check-version {
+  package require shellme 0.1.0
+  if {\[package present shellme\] ne {0.1.0}} {
+    error \"unexpected shellme version: \[package present shellme\]\"
+  }
+}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect clean-exit [expr {$code == 0}]
+    expect unit-ok [expr {[matching $out {^ok 1 - check-version$}] == 1}]
   }
 }} $helpers $root]

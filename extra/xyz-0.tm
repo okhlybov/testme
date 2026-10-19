@@ -27,7 +27,19 @@ package require testme
 
 namespace eval ::xyz {
   proc unit {prefix tags args} {
-    testme::unit -tags $tags -name [DescribeXYZ $prefix $tags] -xyz [DeduceXYZ $tags] -static [DeduceStatic $tags] {*}$args
+    set code [lindex $args end]
+    set rest [lrange $args 0 end-1]
+    set opts [dict merge $rest [dict create \
+      -tags $tags \
+      -name [DescribeXYZ $prefix $tags] \
+      -xyz [DeduceXYZ $tags] \
+      -static [DeduceStatic $tags] \
+    ]]
+    if {[llength [info commands ::testme::submit]] > 0} {
+      ::testme::submit $opts $code
+    } else {
+      testme::unit -name [dict get $opts -name] -tags $tags $code
+    }
   }
 
   proc any? {tag tags} {
