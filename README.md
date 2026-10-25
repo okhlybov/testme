@@ -158,7 +158,7 @@ subtest -name "arithmetic" {
 }
 ```
 
-Subtests can nest to arbitrary depth (each level adding 4 spaces of indentation). If any child unit within a subtest fails, the parent subtest test point is marked `not ok`. In flat mode (without `-n`) or under TAP 13, `subtest` blocks submit their units directly to the flat roster.
+Subtests can nest to arbitrary depth (each level adding 4 spaces of indentation). If any child unit within a subtest fails, the parent subtest test point is marked `not ok`. In flat mode (without `-n`) or under TAP 13, `subtest` blocks submit their units directly to the flat roster, with the subtest's `-skip` / `-todo` directives inherited by its units — the reporting dialect never decides which code runs.
 
 ---
 
@@ -301,7 +301,7 @@ unit -name "math" {expr {2 + 2 == 4}}
 
 Isolation is the design center, not raw trivial-unit throughput: every unit gets a fresh interpreter. Expect roughly **3 ms per trivial unit** (about 2.8 µs of which is Tcl itself — compare `tcltest` running the same trivial tests in one interpreter at ~40 µs each), amortized across workers in the parallel mode. The per-unit cost is independent of environment size.
 
-Measured with `sh bench/run.sh 500` on 8 cores (Tcl 8.6.16, Linux): 500 trivial units — 0.47 s parallel / 1.52 s serial; with 200 extra environment variables — 0.54 s / 1.62 s (no environment-size penalty); 100 subprocess-running units — 0.16 s parallel. Run `bench/run.sh` yourself to reproduce on your hardware.
+Measured with `sh bench/run.sh 500` on 8 cores (Tcl 8.6.16, Linux): 500 trivial units — 0.47 s parallel / 1.52 s serial; with 200 extra environment variables — 0.54 s / 1.62 s (no environment-size penalty on Linux; on Windows every write into a unit's environment table is charged by the C runtime, so bloated tables do cost there). 100 subprocess-running units — 0.16 s parallel. Run `bench/run.sh` yourself to reproduce on your hardware.
 
 ## License
 

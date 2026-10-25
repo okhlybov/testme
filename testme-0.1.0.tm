@@ -26,11 +26,6 @@ if {$context eq {nested}} {
   # and the returned ticket is the unit number in the TAP plan.
   # The submission crosses the interpreter boundary through the ::testme::submit
   # alias planted by the driver.
-  # Declare a unit of work. The submission is immediate - a parametrization cycle
-  # is expected to submit the whole series before any unit starts running -
-  # and the returned ticket is the unit number in the TAP plan.
-  # The submission crosses the interpreter boundary through the ::testme::submit
-  # alias planted by the driver.
   # Core unit accepts minimal options: test identity (-name, -tags), directives
   # (-skip, -todo), and standard stream redirection (-stdout, -stderr, -output).
   # Advanced execution options (such as -timeout and sandbox staging) are relegated
@@ -474,31 +469,9 @@ if {$context eq {toplevel}} {
       variable atend [list]
       variable redirs [dict create]
 
-      variable StreamGuard {
-        if {[llength [info commands ::testme::RealExec]] == 0} {
-          rename exec ::testme::RealExec
-        }
-        proc exec {args} {
-          set argv $args
-          set background [expr {[lindex $argv end] eq "&"}]
-          if {$background} {set argv [lrange $argv 0 end-1]}
-          set n [llength $argv]
-          for {set i 0} {$i < $n} {incr i} {
-            set w [lindex $argv $i]
-            set chan {}
-            if {[regexp {^(?:2>@|>&@|>@)(stdout|stderr)$} $w -> chan]} {
-            } elseif {($w eq {>@} || $w eq {2>@} || $w eq {>&@})
-                      && [lindex $argv [expr {$i + 1}]] in {stdout stderr}} {
-              set chan [lindex $argv [expr {$i + 1}]]
-            }
-            if {$chan ne {}} {
-              return -code error "the code must not write to the process streams (redirection to $chan); run external programs through shellme"
-            }
-          }
-          if {$background} {lappend argv &}
-          tailcall ::testme::RealExec {*}$argv
-        }
-      }
+      # The stream guard definition below is a placeholder spliced in from the
+      # driver face after this script is built: one text, two installs
+      variable StreamGuard @StreamGuard@
 
       proc ResetState {unit} {
         variable stdout [list]
@@ -811,6 +784,11 @@ if {$context eq {toplevel}} {
     proc ::RunUnit {args} { tailcall ::testme::worker::RunUnit {*}$args }
   }
 
+  # The worker threads cannot see the driver face's variables, so the shared
+  # guard text travels inside the init script as a literal splice (a single
+  # braced word standing in for the placeholder)
+  set workerInit [string map [list @StreamGuard@ [list $StreamGuard]] $workerInit]
+
   # Ship the runner into its hosting interpreters: the worker threads receive
   # it through the pool -initcmd once per thread, the serial mode evaluates the
   # same script under the driver interpreter
@@ -868,9 +846,12 @@ if {$context eq {toplevel}} {
     return $id
   }
 
-  # Receive a subtest block submission from a suite
+  # Receive a subtest block submission from a suite. The scope exists in both
+  # modes: nested reporting emits it as an indented subtest block, flat
+  # reporting drops the block itself - but the units submitted inside inherit
+  # its -skip/-todo directives either way, so the reporting dialect never
+  # decides which code runs
   proc SubtestSubmit {box opts code} {
-    variable nested
     variable boxScope
     variable boxScopeStack
     variable scopes
@@ -890,10 +871,6 @@ if {$context eq {toplevel}} {
     }
     if {![dict exists $opts -todo] && [dict exists $scopes $currentScope todo] && [dict get $scopes $currentScope todo] ne {}} {
       dict set opts -todo [dict get $scopes $currentScope todo]
-    }
-    if {!$nested} {
-      $box eval $code
-      return
     }
     set subScope [CreateScope $name $currentScope $opts]
     dict set boxScope $box $subScope
@@ -1039,7 +1016,6 @@ if {$context eq {toplevel}} {
     variable units
     variable where
     variable premature
-    variable failed
     variable quiet
     variable verbose
     variable nested
@@ -1146,7 +1122,8 @@ if {$context eq {toplevel}} {
         $box eval [list cd $root]
         $box eval [list source $script]
       } err opts]} {
-        incr failed
+        # The synthetic unit below carries the failure into the roster and the
+        # tally; the message names the script for the stderr reader
         if {!$quiet || $verbose} { puts stderr "testme: suite script $script failed: $err" }
         if {$premature} {
           # The bailout policy re-raises: the discovery aborts
@@ -1237,19 +1214,53 @@ if {$context eq {toplevel}} {
     return [join $out \n]
   }
 
-  # Print a single TAP test line with its directives and, for a failure, a YAML diagnostic;
-  # dump the captured unit channels under -v/-F and log them into per-unit files under -K
-  proc Emit {id status result options stdout stderr} {
-    variable units
-    variable passed
-    variable failed
+  # The channel report shared by the flat and the nested reporting paths:
+  # under -v the captured output of failed units (of every unit under -F) is
+  # dumped to standard error, and when the garbage is retained (-K) the
+  # captured channels are logged into per-unit files
+  proc ReportChannels {id name status stdout stderr} {
     variable verbose
     variable full
     variable cleanup
     variable stage
     variable origin
-    lassign [dict get $units $id] name skip todo
-    set name [TapDescription $name]
+    if {$verbose && ($full || $status eq {error}) && ([llength $stdout] || [llength $stderr])} {
+      puts stderr {}
+      puts stderr "- $name"
+      if {[llength $stdout]} {
+        puts stderr "-- stdout:"
+        foreach line $stdout { puts stderr $line }
+      }
+      if {[llength $stderr]} {
+        puts stderr "-- stderr:"
+        foreach line $stderr { puts stderr $line }
+      }
+    }
+    if {!$cleanup && ([llength $stdout] || [llength $stderr])} {
+      set tag $name
+      regsub -all {\W} $tag {_} tag
+      set dir [expr {$stage ne {false} ? $stage : $origin}]
+      foreach {chan data} [list stdout $stdout stderr $stderr] {
+        if {![llength $data]} {continue}
+        try {
+          set f [open [file join $dir $id-$tag-$chan.out] w]
+          try {
+            foreach line $data { puts $f $line }
+          } finally {
+            close $f
+          }
+        } on error {} {}
+      }
+    }
+  }
+
+  # Print a single TAP test line with its directives and, for a failure, a YAML diagnostic
+  proc Emit {id status result options stdout stderr} {
+    variable units
+    variable passed
+    variable failed
+    lassign [dict get $units $id] rawname skip todo
+    set name [TapDescription $rawname]
     set skip [CleanTapLine $skip]
     set todo [CleanTapLine $todo]
     if {$skip ne {}} {
@@ -1291,36 +1302,7 @@ if {$context eq {toplevel}} {
       foreach line [split $message \n] { Say "    $line" }
       Say {  ...}
     }
-    # The channel dumps for the failed units (all of them under -F)
-    if {$verbose && ($full || $status eq {error}) && ([llength $stdout] || [llength $stderr])} {
-      puts stderr {}
-      puts stderr "- $name"
-      if {[llength $stdout]} {
-        puts stderr "-- stdout:"
-        foreach line $stdout { puts stderr $line }
-      }
-      if {[llength $stderr]} {
-        puts stderr "-- stderr:"
-        foreach line $stderr { puts stderr $line }
-      }
-    }
-    # The per-unit logs: the retained garbage documents the run
-    if {!$cleanup && ([llength $stdout] || [llength $stderr])} {
-      set tag $name
-      regsub -all {\W} $tag {_} tag
-      set dir [expr {$stage ne {false} ? $stage : $origin}]
-      foreach {chan data} [list stdout $stdout stderr $stderr] {
-        if {![llength $data]} {continue}
-        try {
-          set f [open [file join $dir $id-$tag-$chan.out] w]
-          try {
-            foreach line $data { puts $f $line }
-          } finally {
-            close $f
-          }
-        } on error {} {}
-      }
-    }
+    ReportChannels $id $rawname $status $stdout $stderr
   }
 
   # Format a single unit test line and its diagnostics for nested output
@@ -1373,10 +1355,28 @@ if {$context eq {toplevel}} {
     return $lines
   }
 
+  # The test point verdict for a completed child scope: a skip propagates,
+  # a TODO failure stays expected, any inner failure fails the scope;
+  # returns the {ok|not ok} keyword and the description part carrying
+  # the number in between (and the indentation outside)
+  proc ScopeVerdict {s} {
+    variable scopes
+    variable scopeFailed
+    set name [TapDescription [dict get $scopes $s name]]
+    set skip [CleanTapLine [dict get $scopes $s skip]]
+    if {$skip ne {}} { return [list ok "- $name # SKIP $skip"] }
+    set todo [CleanTapLine [dict get $scopes $s todo]]
+    set directive {}
+    if {$todo ne {}} { set directive " # TODO $todo" }
+    if {[dict exists $scopeFailed $s] && [dict get $scopeFailed $s] && $todo eq {}} {
+      return [list {not ok} "- $name$directive"]
+    }
+    return [list ok "- $name$directive"]
+  }
+
   # Format an entire scope and all its children for nested output
   proc FormatScopeLines {s} {
     variable scopes
-    variable scopeFailed
     set depth [dict get $scopes $s depth]
     set name [CleanTapLine [dict get $scopes $s name]]
     set items [dict get $scopes $s items]
@@ -1402,24 +1402,8 @@ if {$context eq {toplevel}} {
       } else {
         set slines [FormatScopeLines $id]
         foreach sl $slines { lappend lines $sl }
-        set childFailed 0
-        if {[dict exists $scopeFailed $id] && [dict get $scopeFailed $id]} {
-          set childFailed 1
-        }
-        set childName [TapDescription [dict get $scopes $id name]]
-        set childSkip [CleanTapLine [dict get $scopes $id skip]]
-        set childTodo [CleanTapLine [dict get $scopes $id todo]]
-        if {$childSkip ne {}} {
-          lappend lines "${indent}ok $localId - $childName # SKIP $childSkip"
-        } else {
-          set cdirective {}
-          if {$childTodo ne {}} { set cdirective " # TODO $childTodo" }
-          if {$childFailed && $childTodo eq {}} {
-            lappend lines "${indent}not ok $localId - $childName$cdirective"
-          } else {
-            lappend lines "${indent}ok $localId - $childName$cdirective"
-          }
-        }
+        lassign [ScopeVerdict $id] verdict rest
+        lappend lines "${indent}$verdict $localId $rest"
       }
     }
     return $lines
@@ -1430,7 +1414,6 @@ if {$context eq {toplevel}} {
     variable scopes
     variable nextTop
     variable unitOutcome
-    variable scopeFailed
     set items [dict get $scopes 0 items]
     set total [llength $items]
     while {$nextTop <= $total} {
@@ -1449,24 +1432,8 @@ if {$context eq {toplevel}} {
         }
         set lines [FormatScopeLines $id]
         foreach line $lines { Say $line }
-        set childFailed 0
-        if {[dict exists $scopeFailed $id] && [dict get $scopeFailed $id]} {
-          set childFailed 1
-        }
-        set childName [TapDescription [dict get $scopes $id name]]
-        set childSkip [CleanTapLine [dict get $scopes $id skip]]
-        set childTodo [CleanTapLine [dict get $scopes $id todo]]
-        if {$childSkip ne {}} {
-          Say "ok $nextTop - $childName # SKIP $childSkip"
-        } else {
-          set cdirective {}
-          if {$childTodo ne {}} { set cdirective " # TODO $childTodo" }
-          if {$childFailed && $childTodo eq {}} {
-            Say "not ok $nextTop - $childName$cdirective"
-          } else {
-            Say "ok $nextTop - $childName$cdirective"
-          }
-        }
+        lassign [ScopeVerdict $id] verdict rest
+        Say "$verdict $nextTop $rest"
         incr nextTop
       }
     }
@@ -1500,44 +1467,10 @@ if {$context eq {toplevel}} {
     variable scopeFailed
     variable passed
     variable failed
-    variable verbose
-    variable full
-    variable cleanup
-    variable stage
-    variable origin
     variable units
     if {$nested} {
       lassign [dict get $units $id] name skip todo
-      # The channel dumps for the failed units (all of them under -F)
-      if {$verbose && ($full || $status eq {error}) && ([llength $stdout] || [llength $stderr])} {
-        puts stderr {}
-        puts stderr "- $name"
-        if {[llength $stdout]} {
-          puts stderr "-- stdout:"
-          foreach line $stdout { puts stderr $line }
-        }
-        if {[llength $stderr]} {
-          puts stderr "-- stderr:"
-          foreach line $stderr { puts stderr $line }
-        }
-      }
-      # The per-unit logs: the retained garbage documents the run
-      if {!$cleanup && ([llength $stdout] || [llength $stderr])} {
-        set tag $name
-        regsub -all {\W} $tag {_} tag
-        set dir [expr {$stage ne {false} ? $stage : $origin}]
-        foreach {chan data} [list stdout $stdout stderr $stderr] {
-          if {![llength $data]} {continue}
-          try {
-            set f [open [file join $dir $id-$tag-$chan.out] w]
-            try {
-              foreach line $data { puts $f $line }
-            } finally {
-              close $f
-            }
-          } on error {} {}
-        }
-      }
+      ReportChannels $id $name $status $stdout $stderr
       if {$skip ne {} || $status eq {ok} || $status eq {skipped}} {
         incr passed
       } else {
@@ -1613,30 +1546,17 @@ if {$context eq {toplevel}} {
     }
   }
 
-  # Spawns a background watchdog to periodically retry deleting locked directories (e.g. on Windows)
+  # Spawns a background watchdog to periodically retry deleting locked directories (e.g. on Windows);
+  # the script carries the MakeWritable definition harvested from the live procedure,
+  # so the tree walk exists as one text per module
   proc SpawnWatchdog {dir {timeout 60}} {
     if {![file exists $dir]} return
     set tempDir [file dirname [file normalize $dir]]
     set script [file join $tempDir "watchdog-[pid]-[expr {int(rand()*999999)}].tcl"]
     if {[catch {
       set f [open $script w]
+      puts $f [list proc MakeWritable [info args MakeWritable] [info body MakeWritable]]
       puts $f {
-        proc MakeWritable {dir} {
-          catch {file attributes $dir -permissions 0755}
-          catch {file attributes $dir -readonly 0}
-          foreach item [glob -nocomplain -directory $dir * .*] {
-            set tail [file tail $item]
-            if {$tail eq "." || $tail eq ".."} continue
-            set ftype ""
-            catch {set ftype [file type $item]}
-            if {[file isdirectory $item] && $ftype ne "link"} {
-              MakeWritable $item
-            } else {
-              catch {file attributes $item -permissions 0644}
-              catch {file attributes $item -readonly 0}
-            }
-          }
-        }
         set target [lindex $argv 0]
         set timeout 60
         if {[llength $argv] > 1 && [string is integer -strict [lindex $argv 1]]} {

@@ -61,6 +61,8 @@ namespace eval ::shellme {
   }
 
 
+  # A twin of ::testme::MakeWritable: the modules stay loadable without each
+  # other, so each carries its own copy of the tree walk
   proc MakeWritable {dir} {
     catch {file attributes $dir -permissions 0755}
     catch {file attributes $dir -readonly 0}
@@ -79,30 +81,17 @@ namespace eval ::shellme {
   }
 
 
-  # Spawns a background watchdog to periodically retry deleting locked directories (e.g. on Windows)
+  # Spawns a background watchdog to periodically retry deleting locked directories (e.g. on Windows);
+  # the script carries the MakeWritable definition harvested from the live procedure,
+  # so the tree walk exists as one text per module
   proc SpawnWatchdog {dir {timeout 60}} {
     if {![file exists $dir]} return
     set tempDir [file dirname [file normalize $dir]]
     set script [file join $tempDir "watchdog-[pid]-[expr {int(rand()*999999)}].tcl"]
     if {[catch {
       set f [open $script w]
+      puts $f [list proc MakeWritable [info args MakeWritable] [info body MakeWritable]]
       puts $f {
-        proc MakeWritable {dir} {
-          catch {file attributes $dir -permissions 0755}
-          catch {file attributes $dir -readonly 0}
-          foreach item [glob -nocomplain -directory $dir * .*] {
-            set tail [file tail $item]
-            if {$tail eq "." || $tail eq ".."} continue
-            set ftype ""
-            catch {set ftype [file type $item]}
-            if {[file isdirectory $item] && $ftype ne "link"} {
-              MakeWritable $item
-            } else {
-              catch {file attributes $item -permissions 0644}
-              catch {file attributes $item -readonly 0}
-            }
-          }
-        }
         set target [lindex $argv 0]
         set timeout 60
         if {[llength $argv] > 1 && [string is integer -strict [lindex $argv 1]]} {

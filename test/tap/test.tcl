@@ -446,3 +446,43 @@ unit -name last {expr {1}}
     expect consumer-sees-all [expr {[tapme::count] == 4 && [tapme::ok]}]
   }
 }} $helpers $root]
+
+# A subtest skip directive reaches its units in flat mode as well: the
+# reporting dialect must not decide which code runs
+unit -name subtest-skip-flat [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+subtest -name group -skip {group disabled} {
+  unit -name child { expr {1} }
+}
+unit -name outside { expr {1} }
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect clean-exit [expr {$code == 0}]
+    expect child-skipped [expr {[matching $out {^ok \d+ - child # SKIP group disabled$}] == 1}]
+    expect outside-ran [expr {[matching $out {^ok \d+ - outside$}] == 1}]
+    expect roster [expr {[matching $out {^1\.\.2$}] == 1}]
+  }
+}} $helpers $root]
+
+# A subtest todo directive reaches its units in flat mode the same way
+unit -name subtest-todo-flat [list apply {{helpers root} {
+  source $helpers
+  set pairs [list]
+  lappend pairs [list test.tcl "tcl::tm::add $root
+package require testme
+subtest -name group -todo {group broken} {
+  unit -name child { error {still broken} }
+}
+"]
+  withfixture $pairs {
+    lassign [capture tclsh $dir/test.tcl] code out
+    expect expected-failure [expr {$code == 0}]
+    expect child-todo [expr {[matching $out {^not ok \d+ - child # TODO group broken$}] == 1}]
+    # A TODO failure is expected: excluded from both tallies of the summary
+    expect summary [expr {[matching $out {^testme: 0 passed, 0 failed$}] == 1}]
+  }
+}} $helpers $root]

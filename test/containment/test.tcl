@@ -30,6 +30,8 @@ error {suite blew up}
     expect synthetic-entry [expr {[matching $out {^not ok \d+ - broken/test\.tcl$}] == 1}]
     expect roster [expr {[matching $out {^1\.\.2$}] == 1}]
     expect failed-exit [expr {$code == 1}]
+    # The failed suite counts once: the synthetic unit carries the whole failure
+    expect single-failure-tally [expr {[matching $out {^testme: 1 passed, 1 failed$}] == 1}]
   }
 }} $helpers $root]
 
